@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Financial Journal</title>
+  
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            appBg: '#101214',
+            surface: '#171A1F',
+            borderMuted: '#2A2F36',
+            primaryText: '#F5F5F4',
+            secondaryText: '#8B9097',
+            sage: '#6F8A76',
+            incomeColor: '#7A9477',
+            expenseColor: '#A77B6A'
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- React & Babel -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- Supabase JS Client -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <style>
+    body {
+      background-color: #101214;
+      color: #F5F5F4;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .no-scrollbar::-webkit-scrollbar { display: none; }
+    .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+  </style>
+</head>
+<body class="min-h-screen selection:bg-sage selection:text-appBg">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    // Configuration
+    const SUPABASE_URL = "https://jzawibejjqkvkbshxekf.supabase.co";
+    const SUPABASE_ANON_KEY = "sb_publishable_7jW23phEPFm60I7rJvKudg_YmDElTi3";
+    const USER_ID = "aca8bd82-7e0f-4e78-84ac-7967d76dd24b";
+
+    const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    function App() {
+      const [transactions, setTransactions] = useState([]);
+      const [totals, setTotals] = useState({ netBalance: 0, spentToday: 0, totalExpenses: 0, totalDeposits: 0 });
+      const [liveNotification, setLiveNotification] = useState(null);
+      const [filter, setFilter] = useState('ALL');
+      const [showComposer, setShowComposer] = useState(false);
+      const [expandedTxId, setExpandedTxId] = useState(null);
+      
+      // Form state
+      const [manualAmount, setManualAmount] = useState('');
+      const [manualNote, setManualNote] = useState('');
+      const [manualCategory, setManualCategory] = useState('General');
+      const [manualType, setManualType] = useState('EXPENSE');
+
+      const chartRef = useRef(null);
+      const chartInstance = useRef(null);
+
+      // 1. Contextual Greeting Logic
+      const getGreeting = () => {
+        const hour = new Date().getHours();
+        if (hour < 12) return "Good morning";
+        if (hour < 18) return "Good afternoon";
+        return "Good evening";
+      };
+
+      // 2. Initial Data Fetch
+      const fetchData = async () => {
+        const [expRes, depRes] = await Promise.all([
+          supabase.from('expenses').select('*').eq('user_id', USER_ID).order('created_at', { ascending: false }),
+          supabase.from('deposits').select('*').eq('user_id', USER_ID).order('created_at', { ascending: false })
+        ]);
+
+        const expenses = (expRes.data || []).map(item => ({ ...item, type: 'EXPENSE' }));
+        const deposits = (depRes.data || []).map(item => ({ ...item, type: 'DEPOSIT' }));
+
+        const combined = [...expenses, ...deposits].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+        
+        setTransactions(combined);
+        calculateMetrics(combined);
+      };
+
+      // 3. Metrics Calculation
+      const calculateMetrics = (data) => {
+        const todayStr = new Date().toDateString();
+        let todaySpent = 0;
+        let totalExp = 0;
+        let totalDep = 0;
+
+        data.forEach(item => {
+          const itemDate = new Date(item.created_at).toDateString();
+          const amt = Number(item.amount) || 0;
+
+          if (item.type === 'EXPENSE') {
+            totalExp += amt;
+            if (itemDate === todayStr) todaySpent += amt;
+          } else {
+            totalDep += amt;
+          }
+        });
+
+        setTotals({ 
+          netBalance: totalDep - totalExp,
+          spentToday: todaySpent, 
+          totalExpenses: totalExp, 
+          totalDeposits: totalDep 
+        });
+      };
+
+      // 4. Delete Entry
+      const handleDelete = async (id, type) => {
+        if (!confirm("Remove this entry?")) return;
+        const table = type === 'EXPENSE' ? 'expenses' : 'deposits';
+        const { error } = await supabase.from(table).delete().eq('id', id);
+        
+        if (!error) {
+          setTransactions(prev => {
+            const updated = prev.filter(item => item.id !== id);
+            calculateMetrics(updated);
+            return updated;
+          });
+        }
+      };
+
+      // 5. Add Transaction
+      const handleAddManual = async (e) => {
+        e.preventDefault();
+        if (!manualAmount) return;
+
+        const table = manualType === 'EXPENSE' ? 'expenses' : 'deposits';
+        const payload = manualType === 'EXPENSE' 
+          ? { user_id: USER_ID, amount: parseFloat(manualAmount), note: manualNote || 'Expense', category: manualCategory }
+          : { user_id: USER_ID, amount: parseFloat(manualAmount), note: manualNote || 'Deposit' };
+
+        const { data, error } = await supabase.from(table).insert(payload).select();
+        if (!error && data) {
+          setShowComposer(false);
+          setManualAmount('');
+          setManualNote('');
+          fetchData();
+        }
+      };
+
+      // 6. Supabase Realtime Listener
+      useEffect(() => {
+        fetchData();
+
+        const channel = supabase
+          .channel('realtime_finance')
+          .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'expenses' }, (payload) => {
+            handleRealtimeInsert({ ...payload.new, type: 'EXPENSE' });
+          })
+          .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'deposits' }, (payload) => {
+            handleRealtimeInsert({ ...payload.new, type: 'DEPOSIT' });
+          })
+          .subscribe();
+
+        return () => { supabase.removeChannel(channel); };
+      }, []);
+
+      const handleRealtimeInsert = (newItem) => {
+        if (navigator.vibrate) navigator.vibrate([80, 40]);
+
+        setLiveNotification(`+ ₹${newItem.amount} (${newItem.note || 'Entry'})`);
+        setTimeout(() => setLiveNotification(null), 4000);
+
+        setTransactions(prev => {
+          const updated = [newItem, ...prev];
+          calculateMetrics(updated);
+          return updated;
+        });
+      };
+
+      // 7. Render Monochrome Breakdown Chart
+      useEffect(() => {
+        if (!chartRef.current) return;
+
+        const categoryTotals = {};
+        transactions.filter(t => t.type === 'EXPENSE').forEach(t => {
+          const cat = t.category || 'General';
+          categoryTotals[cat] = (categoryTotals[cat] || 0) + Number(t.amount);
+        });
+
+        const labels = Object.keys(categoryTotals);
+        const data = Object.values(categoryTotals);
+
+        if (chartInstance.current) chartInstance.current.destroy();
+
+        const ctx = chartRef.current.getContext('2d');
+        chartInstance.current = new Chart(ctx, {
+          type: 'doughnut',
+          data: {
+            labels: labels.length ? labels : ['No Data'],
+            datasets: [{
+              data: data.length ? data : [1],
+              backgroundColor: labels.length 
+                ? ['#6F8A76', '#A77B6A', '#8B9097', '#2A2F36', '#484E57'] 
+                : ['#2A2F36'],
+              borderWidth: 0
+            }]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: { 
+                position: 'bottom', 
+                labels: { color: '#8B9097', font: { size: 11 }, boxWidth: 8, usePointStyle: true } 
+              }
+            },
+            cutout: '80%'
+          }
+        });
+      }, [transactions]);
+
+      // Grouping logic for Timeline layout
+      const groupTransactionsByDate = (txs) => {
+        const groups = {};
+        const todayStr = new Date().toDateString();
+        const yesterday = new Date();
+        yesterday.setDate(yesterday.getDate() - 1);
+        const yesterdayStr = yesterday.toDateString();
+
+        txs.forEach(t => {
+          const d = new Date(t.created_at);
+          const dStr = d.toDateString();
+          let label = dStr;
+          if (dStr === todayStr) label = 'Today';
+          else if (dStr === yesterdayStr) label = 'Yesterday';
+          else label = d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+
+          if (!groups[label]) groups[label] = [];
+          groups[label].push(t);
+        });
+        return groups;
+      };
+
+      // Activity Heatmap logic (Last 7 days)
+      const getHeatmapData = () => {
+        const days = [];
+        const today = new Date();
+        for (let i = 6; i >= 0; i--) {
+          const d = new Date();
+          d.setDate(today.getDate() - i);
+          const dateStr = d.toDateString();
+          const dayName = d.toLocaleDateString('en-US', { weekday: 'narrow' });
+          
+          const daySpend = transactions
+            .filter(t => t.type === 'EXPENSE' && new Date(t.created_at).toDateString() === dateStr)
+            .reduce((sum, t) => sum + Number(t.amount || 0), 0);
+            
+          days.push({ dayName, spend: daySpend });
+        }
+        return days;
+      };
+
+      const filteredTransactions = transactions.filter(t => {
+        if (filter === 'EXPENSES') return t.type === 'EXPENSE';
+        if (filter === 'DEPOSITS') return t.type === 'DEPOSIT';
+        return true;
+      });
+
+      const groupedTransactions = groupTransactionsByDate(filteredTransactions);
+      const heatmap = getHeatmapData();
+
+      return (
+        <div className="max-w-2xl mx-auto px-5 py-8 md:py-14 pb-28">
+          
+          {/* Toast Notification */}
+          {liveNotification && (
+            <div className="fixed top-6 left-1/2 -translate-x-1/2 bg-surface border border-borderMuted text-primaryText text-xs px-4 py-2.5 rounded-lg shadow-xl z-50 flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-sage animate-pulse"></span>
+              <span>{liveNotification}</span>
+            </div>
+          )}
+
+          {/* Dynamic Greeting Header */}
+          <header className="mb-10 flex items-center justify-between">
+            <div>
+              <h1 className="text-sm font-medium text-secondaryText tracking-wide">{getGreeting()}</h1>
+              <p className="text-xs text-secondaryText/70 mt-0.5">
+                {totals.spentToday > 0 ? `You've spent ₹${totals.spentToday.toLocaleString('en-IN')} today.` : 'Today is quieter so far.'}
+              </p>
+            </div>
+            <div className="flex items-center gap-2 text-[11px] text-secondaryText border border-borderMuted px-2.5 py-1 rounded-md bg-surface/50">
+              <span className="w-1.5 h-1.5 rounded-full bg-sage"></span>
+              <span>Live</span>
+            </div>
+          </header>
+
+          {/* Hero Section: Available Balance */}
+          <section className="mb-12">
+            <div className="text-xs font-medium text-secondaryText uppercase tracking-wider mb-1">Available Balance</div>
+            <div className="text-4xl md:text-5xl font-light tracking-tight text-primaryText mb-8">
+              ₹{totals.netBalance.toLocaleString('en-IN')}
+            </div>
+
+            {/* Sub-stats: Card-less Layout */}
+            <div className="grid grid-cols-3 gap-4 border-t border-b border-borderMuted/60 py-4">
+              <div>
+                <div className="text-[11px] text-secondaryText">Spent Today</div>
+                <div className="text-sm font-medium text-primaryText mt-0.5">₹{totals.spentToday.toLocaleString('en-IN')}</div>
+              </div>
+              <div>
+                <div className="text-[11px] text-secondaryText">Income</div>
+                <div className="text-sm font-medium text-incomeColor mt-0.5">₹{totals.totalDeposits.toLocaleString('en-IN')}</div>
+              </div>
+              <div>
+                <div className="text-[11px] text-secondaryText">Expenses</div>
+                <div className="text-sm font-medium text-expenseColor mt-0.5">₹{totals.totalExpenses.toLocaleString('en-IN')}</div>
+              </div>
+            </div>
+          </section>
+
+          {/* Activity Heatmap & Category Breakdown */}
+          <section className="grid grid-cols-1 sm:grid-cols-2 gap-6 mb-12">
+            {/* Heatmap */}
+            <div className="bg-surface border border-borderMuted/60 p-4 rounded-lg">
+              <div className="text-xs font-medium text-secondaryText mb-3">7-Day Spending Activity</div>
+              <div className="flex items-center justify-between pt-2">
+                {heatmap.map((item, idx) => {
+                  let opacityClass = 'bg-borderMuted/40';
+                  if (item.spend > 0) opacityClass = 'bg-expenseColor/40';
+                  if (item.spend > 1000) opacityClass = 'bg-expenseColor/80';
+                  if (item.spend > 3000) opacityClass = 'bg-expenseColor';
+
+                  return (
+                    <div key={idx} className="flex flex-col items-center gap-1.5">
+                      <div className={`w-6 h-6 rounded-md ${opacityClass} transition-colors`} title={`₹${item.spend}`}></div>
+                      <span className="text-[10px] text-secondaryText">{item.dayName}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Minimal Doughnut Chart */}
+            <div className="bg-surface border border-borderMuted/60 p-4 rounded-lg flex flex-col justify-between">
+              <div className="text-xs font-medium text-secondaryText mb-1">Expense Breakdown</div>
+              <div className="h-24 relative flex items-center justify-center my-1">
+                <canvas ref={chartRef}></canvas>
+              </div>
+            </div>
+          </section>
+
+          {/* Main Feed: Timeline Finance */}
+          <section>
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-xs font-medium text-secondaryText uppercase tracking-wider">Journal Stream</h2>
+              
+              {/* Filter Tabs */}
+              <div className="flex gap-2 text-xs">
+                {['ALL', 'EXPENSES', 'DEPOSITS'].map((tab) => (
+                  <button
+                    key={tab}
+                    onClick={() => setFilter(tab)}
+                    className={`px-2 py-0.5 rounded transition-colors ${
+                      filter === tab ? 'text-primaryText bg-surface border border-borderMuted' : 'text-secondaryText hover:text-primaryText'
+                    }`}
+                  >
+                    {tab.toLowerCase()}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Timeline Stream with Vertical Anchor Line */}
+            {Object.keys(groupedTransactions).length === 0 ? (
+              <div className="text-center py-12 text-secondaryText text-xs">No entries recorded.</div>
+            ) : (
+              <div className="relative border-l border-borderMuted/80 pl-6 space-y-8 ml-2">
+                {Object.entries(groupedTransactions).map(([dateLabel, items]) => (
+                  <div key={dateLabel} className="relative">
+                    
+                    {/* Date Tag */}
+                    <div className="text-xs font-medium text-secondaryText mb-3 -ml-6 flex items-center gap-2">
+                      <span className="w-2 h-2 rounded-full bg-borderMuted inline-block"></span>
+                      <span>{dateLabel}</span>
+                    </div>
+
+                    {/* Transaction Items */}
+                    <div className="space-y-3">
+                      {items.map((item) => {
+                        const isExpense = item.type === 'EXPENSE';
+                        const isExpanded = expandedTxId === item.id;
+
+                        return (
+                          <div 
+                            key={item.id} 
+                            onClick={() => setExpandedTxId(isExpanded ? null : item.id)}
+                            className="group relative cursor-pointer bg-surface/30 hover:bg-surface border border-borderMuted/40 p-3 rounded-lg transition-all"
+                          >
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-2.5">
+                                {/* Dot Language */}
+                                <span className={`w-2 h-2 rounded-full flex-shrink-0 ${isExpense ? 'bg-expenseColor' : 'bg-incomeColor'}`}></span>
+                                <span className="text-sm font-medium text-primaryText">{item.note || (isExpense ? 'Expense' : 'Deposit')}</span>
+                              </div>
+                              
+                              <span className={`text-sm font-medium ${isExpense ? 'text-expenseColor' : 'text-incomeColor'}`}>
+                                {isExpense ? '-' : '+'}₹{Number(item.amount).toLocaleString('en-IN')}
+                              </span>
+                            </div>
+
+                            {/* Progressive Disclosure Details */}
+                            {isExpanded && (
+                              <div className="mt-3 pt-2 border-t border-borderMuted/40 flex items-center justify-between text-xs text-secondaryText">
+                                <div className="flex items-center gap-3">
+                                  <span>{new Date(item.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                                  {isExpense && item.category && (
+                                    <span className="text-[10px] bg-borderMuted/60 text-primaryText px-1.5 py-0.5 rounded">
+                                      {item.category}
+                                    </span>
+                                  )}
+                                </div>
+                                <button 
+                                  onClick={(e) => { e.stopPropagation(); handleDelete(item.id, item.type); }}
+                                  className="text-expenseColor hover:underline text-[11px]"
+                                >
+                                  Delete
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          {/* Floating Composer Toggle Button */}
+          <button 
+            onClick={() => setShowComposer(!showComposer)}
+            className="fixed bottom-6 right-6 w-12 h-12 rounded-full bg-sage text-appBg font-bold text-xl flex items-center justify-center shadow-lg hover:opacity-90 transition-all z-40"
+            title="Add entry"
+          >
+            {showComposer ? '✕' : '＋'}
+          </button>
+
+          {/* Floating Composer Form Modal */}
+          {showComposer && (
+            <div className="fixed inset-0 bg-appBg/80 backdrop-blur-xs flex items-end sm:items-center justify-center p-4 z-50">
+              <div className="bg-surface border border-borderMuted p-6 rounded-lg w-full max-w-md">
+                <div className="flex justify-between items-center mb-5">
+                  <h3 className="text-sm font-medium text-primaryText">New Journal Entry</h3>
+                  <button onClick={() => setShowComposer(false)} className="text-secondaryText hover:text-primaryText text-xs">Close</button>
+                </div>
+
+                <form onSubmit={handleAddManual} className="space-y-4">
+                  {/* Type Selector */}
+                  <div className="grid grid-cols-2 gap-2 p-1 bg-appBg rounded-md border border-borderMuted">
+                    <button
+                      type="button"
+                      onClick={() => setManualType('EXPENSE')}
+                      className={`py-1.5 text-xs font-medium rounded transition-colors ${manualType === 'EXPENSE' ? 'bg-surface text-expenseColor' : 'text-secondaryText'}`}
+                    >Expense</button>
+                    <button
+                      type="button"
+                      onClick={() => setManualType('DEPOSIT')}
+                      className={`py-1.5 text-xs font-medium rounded transition-colors ${manualType === 'DEPOSIT' ? 'bg-surface text-incomeColor' : 'text-secondaryText'}`}
+                    >Deposit</button>
+                  </div>
+
+                  {/* Amount */}
+                  <div>
+                    <label className="block text-[11px] text-secondaryText mb-1">Amount (₹)</label>
+                    <input 
+                      type="number" 
+                      required
+                      placeholder="0.00"
+                      value={manualAmount}
+                      onChange={(e) => setManualAmount(e.target.value)}
+                      className="w-full bg-appBg border border-borderMuted rounded-md px-3 py-2 text-sm text-primaryText focus:outline-none focus:border-sage"
+                    />
+                  </div>
+
+                  {/* Note */}
+                  <div>
+                    <label className="block text-[11px] text-secondaryText mb-1">Note / Merchant</label>
+                    <input 
+                      type="text" 
+                      placeholder="e.g. Coffee"
+                      value={manualNote}
+                      onChange={(e) => setManualNote(e.target.value)}
+                      className="w-full bg-appBg border border-borderMuted rounded-md px-3 py-2 text-sm text-primaryText focus:outline-none focus:border-sage"
+                    />
+                  </div>
+
+                  {/* Category */}
+                  {manualType === 'EXPENSE' && (
+                    <div>
+                      <label className="block text-[11px] text-secondaryText mb-1">Category</label>
+                      <select
+                        value={manualCategory}
+                        onChange={(e) => setManualCategory(e.target.value)}
+                        className="w-full bg-appBg border border-borderMuted rounded-md px-3 py-2 text-sm text-primaryText focus:outline-none focus:border-sage"
+                      >
+                        <option value="Food & Dining">Food & Dining</option>
+                        <option value="Shopping">Shopping</option>
+                        <option value="Transport">Transport</option>
+                        <option value="General">General</option>
+                      </select>
+                    </div>
+                  )}
+
+                  <button 
+                    type="submit" 
+                    className="w-full bg-sage text-appBg py-2.5 rounded-md text-xs font-medium mt-2 hover:opacity-90 transition-opacity"
+                  >
+                    Save Entry
+                  </button>
+                </form>
+              </div>
+            </div>
+          )}
+
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
