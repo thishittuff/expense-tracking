@@ -3,6 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>Financial Journal</title>
   
   <!-- Tailwind CSS -->
@@ -44,6 +46,7 @@
       color: #F5F5F4;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       -webkit-tap-highlight-color: transparent;
+      overscroll-behavior-y: contain; /* Smooth pull-to-refresh handling */
     }
     .no-scrollbar::-webkit-scrollbar { display: none; }
     .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
@@ -69,7 +72,12 @@
       const [filter, setFilter] = useState('ALL');
       const [showComposer, setShowComposer] = useState(false);
       const [expandedTxId, setExpandedTxId] = useState(null);
+      const [isRefreshing, setIsRefreshing] = useState(false);
       
+      // Pull-to-refresh touch state
+      const [touchStartY, setTouchStartY] = useState(0);
+      const [pullDistance, setPullDistance] = useState(0);
+
       // Form state
       const [manualAmount, setManualAmount] = useState('');
       const [manualNote, setManualNote] = useState('');
@@ -79,7 +87,6 @@
       const chartRef = useRef(null);
       const chartInstance = useRef(null);
 
-      // 1. Contextual Greeting Logic
       const getGreeting = () => {
         const hour = new Date().getHours();
         if (hour < 12) return "Good morning";
@@ -87,23 +94,76 @@
         return "Good evening";
       };
 
-      // 2. Initial Data Fetch
+      // Data Fetching
       const fetchData = async () => {
-        const [expRes, depRes] = await Promise.all([
-          supabase.from('expenses').select('*').eq('user_id', USER_ID).order('created_at', { ascending: false }),
-          supabase.from('deposits').select('*').eq('user_id', USER_ID).order('created_at', { ascending: false })
-        ]);
+        setIsRefreshing(true);
+        try {
+          const [expRes, depRes] = await Promise.all([
+            supabase.from('expenses').select('*').eq('user_id', USER_ID).order('created_at', { ascending: false }),
+            supabase.from('deposits').select('*').eq('user_id', USER_ID).order('created_at', { ascending: false })
+          ]);
 
-        const expenses = (expRes.data || []).map(item => ({ ...item, type: 'EXPENSE' }));
-        const deposits = (depRes.data || []).map(item => ({ ...item, type: 'DEPOSIT' }));
+          const expenses = (expRes.data || []).map(item => ({ ...item, type: 'EXPENSE' }));
+          const deposits = (depRes.data || []).map(item => ({ ...item, type: 'DEPOSIT' }));
 
-        const combined = [...expenses, ...deposits].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-        
-        setTransactions(combined);
-        calculateMetrics(combined);
+          const combined = [...expenses, ...deposits].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+          
+          setTransactions(combined);
+          calculateMetrics(combined);
+        } catch (err) {
+          console.error("Fetch error:", err);
+        } finally {
+          setTimeout(() => setIsRefreshing(false), 300);
+        }
       };
 
-      // 3. Metrics Calculation
+      // Auto-refresh when returning to app on iOS Standalone mode
+      useEffect(() => {
+        const handleVisibilityChange = () => {
+          if (document.visibilityState === 'visible') {
+            fetchData();
+          }
+        };
+
+        const handleFocus = () => {
+          fetchData();
+        };
+
+        document.addEventListener('visibilitychange', handleVisibilityChange);
+        window.addEventListener('focus', handleFocus);
+
+        return () => {
+          document.removeEventListener('visibilitychange', handleVisibilityChange);
+          window.removeEventListener('focus', handleFocus);
+        };
+      }, []);
+
+      // Touch handlers for Pull-to-Refresh
+      const handleTouchStart = (e) => {
+        if (window.scrollY === 0) {
+          setTouchStartY(e.touches[0].clientY);
+        }
+      };
+
+      const handleTouchMove = (e) => {
+        if (window.scrollY === 0 && touchStartY > 0) {
+          const currentY = e.touches[0].clientY;
+          const distance = currentY - touchStartY;
+          if (distance > 0) {
+            setPullDistance(Math.min(distance, 80));
+          }
+        }
+      };
+
+      const handleTouchEnd = () => {
+        if (pullDistance >= 60) {
+          fetchData();
+        }
+        setTouchStartY(0);
+        setPullDistance(0);
+      };
+
+      // Calculate totals
       const calculateMetrics = (data) => {
         const todayStr = new Date().toDateString();
         let todaySpent = 0;
@@ -130,7 +190,7 @@
         });
       };
 
-      // 4. Delete Entry
+      // Delete Entry
       const handleDelete = async (id, type) => {
         if (!confirm("Remove this entry?")) return;
         const table = type === 'EXPENSE' ? 'expenses' : 'deposits';
@@ -145,7 +205,7 @@
         }
       };
 
-      // 5. Add Transaction
+      // Add Entry
       const handleAddManual = async (e) => {
         e.preventDefault();
         if (!manualAmount) return;
@@ -164,7 +224,7 @@
         }
       };
 
-      // 6. Supabase Realtime Listener
+      // Supabase Realtime Listener
       useEffect(() => {
         fetchData();
 
@@ -194,7 +254,7 @@
         });
       };
 
-      // 7. Render Monochrome Breakdown Chart
+      // Chart Rendering
       useEffect(() => {
         if (!chartRef.current) return;
 
@@ -236,7 +296,7 @@
         });
       }, [transactions]);
 
-      // Grouping logic for Timeline layout
+      // Timeline Grouping
       const groupTransactionsByDate = (txs) => {
         const groups = {};
         const todayStr = new Date().toDateString();
@@ -258,7 +318,7 @@
         return groups;
       };
 
-      // Activity Heatmap logic (Last 7 days)
+      // Heatmap Data
       const getHeatmapData = () => {
         const days = [];
         const today = new Date();
@@ -287,8 +347,22 @@
       const heatmap = getHeatmapData();
 
       return (
-        <div className="max-w-2xl mx-auto px-5 py-8 md:py-14 pb-28">
-          
+        <div 
+          className="max-w-2xl mx-auto px-5 py-8 md:py-14 pb-28 min-h-screen"
+          onTouchStart={handleTouchStart}
+          onTouchMove={handleTouchMove}
+          onTouchEnd={handleTouchEnd}
+        >
+          {/* Pull Indicator for Mobile */}
+          {pullDistance > 0 && (
+            <div 
+              className="flex justify-center items-center py-2 text-xs text-secondaryText transition-all"
+              style={{ height: `${pullDistance}px`, opacity: pullDistance / 60 }}
+            >
+              <span>{pullDistance >= 60 ? "Release to refresh..." : "Pull to refresh"}</span>
+            </div>
+          )}
+
           {/* Toast Notification */}
           {liveNotification && (
             <div className="fixed top-6 left-1/2 -translate-x-1/2 bg-surface border border-borderMuted text-primaryText text-xs px-4 py-2.5 rounded-lg shadow-xl z-50 flex items-center gap-2">
@@ -305,9 +379,24 @@
                 {totals.spentToday > 0 ? `You've spent ₹${totals.spentToday.toLocaleString('en-IN')} today.` : 'Today is quieter so far.'}
               </p>
             </div>
-            <div className="flex items-center gap-2 text-[11px] text-secondaryText border border-borderMuted px-2.5 py-1 rounded-md bg-surface/50">
-              <span className="w-1.5 h-1.5 rounded-full bg-sage"></span>
-              <span>Live</span>
+            
+            <div className="flex items-center gap-2">
+              {/* Refresh Button */}
+              <button 
+                onClick={fetchData}
+                disabled={isRefreshing}
+                className="p-1.5 rounded-md text-secondaryText hover:text-primaryText border border-borderMuted/60 bg-surface/50 active:scale-95 transition-all"
+                title="Refresh data"
+              >
+                <svg className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-sage' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                </svg>
+              </button>
+
+              <div className="flex items-center gap-2 text-[11px] text-secondaryText border border-borderMuted px-2.5 py-1 rounded-md bg-surface/50">
+                <span className="w-1.5 h-1.5 rounded-full bg-sage"></span>
+                <span>Live</span>
+              </div>
             </div>
           </header>
 
@@ -318,7 +407,7 @@
               ₹{totals.netBalance.toLocaleString('en-IN')}
             </div>
 
-            {/* Sub-stats: Card-less Layout */}
+            {/* Sub-stats */}
             <div className="grid grid-cols-3 gap-4 border-t border-b border-borderMuted/60 py-4">
               <div>
                 <div className="text-[11px] text-secondaryText">Spent Today</div>
@@ -335,9 +424,8 @@
             </div>
           </section>
 
-          {/* Activity Heatmap & Category Breakdown */}
+          {/* Heatmap & Category Breakdown */}
           <section className="grid grid-cols-1 sm:grid-cols-2 gap-6 mb-12">
-            {/* Heatmap */}
             <div className="bg-surface border border-borderMuted/60 p-4 rounded-lg">
               <div className="text-xs font-medium text-secondaryText mb-3">7-Day Spending Activity</div>
               <div className="flex items-center justify-between pt-2">
@@ -357,7 +445,6 @@
               </div>
             </div>
 
-            {/* Minimal Doughnut Chart */}
             <div className="bg-surface border border-borderMuted/60 p-4 rounded-lg flex flex-col justify-between">
               <div className="text-xs font-medium text-secondaryText mb-1">Expense Breakdown</div>
               <div className="h-24 relative flex items-center justify-center my-1">
@@ -371,7 +458,6 @@
             <div className="flex items-center justify-between mb-6">
               <h2 className="text-xs font-medium text-secondaryText uppercase tracking-wider">Journal Stream</h2>
               
-              {/* Filter Tabs */}
               <div className="flex gap-2 text-xs">
                 {['ALL', 'EXPENSES', 'DEPOSITS'].map((tab) => (
                   <button
@@ -387,7 +473,6 @@
               </div>
             </div>
 
-            {/* Timeline Stream with Vertical Anchor Line */}
             {Object.keys(groupedTransactions).length === 0 ? (
               <div className="text-center py-12 text-secondaryText text-xs">No entries recorded.</div>
             ) : (
@@ -395,13 +480,11 @@
                 {Object.entries(groupedTransactions).map(([dateLabel, items]) => (
                   <div key={dateLabel} className="relative">
                     
-                    {/* Date Tag */}
                     <div className="text-xs font-medium text-secondaryText mb-3 -ml-6 flex items-center gap-2">
                       <span className="w-2 h-2 rounded-full bg-borderMuted inline-block"></span>
                       <span>{dateLabel}</span>
                     </div>
 
-                    {/* Transaction Items */}
                     <div className="space-y-3">
                       {items.map((item) => {
                         const isExpense = item.type === 'EXPENSE';
@@ -415,7 +498,6 @@
                           >
                             <div className="flex items-center justify-between">
                               <div className="flex items-center gap-2.5">
-                                {/* Dot Language */}
                                 <span className={`w-2 h-2 rounded-full flex-shrink-0 ${isExpense ? 'bg-expenseColor' : 'bg-incomeColor'}`}></span>
                                 <span className="text-sm font-medium text-primaryText">{item.note || (isExpense ? 'Expense' : 'Deposit')}</span>
                               </div>
@@ -425,7 +507,6 @@
                               </span>
                             </div>
 
-                            {/* Progressive Disclosure Details */}
                             {isExpanded && (
                               <div className="mt-3 pt-2 border-t border-borderMuted/40 flex items-center justify-between text-xs text-secondaryText">
                                 <div className="flex items-center gap-3">
@@ -458,7 +539,7 @@
           {/* Floating Composer Toggle Button */}
           <button 
             onClick={() => setShowComposer(!showComposer)}
-            className="fixed bottom-6 right-6 w-12 h-12 rounded-full bg-sage text-appBg font-bold text-xl flex items-center justify-center shadow-lg hover:opacity-90 transition-all z-40"
+            className="fixed bottom-6 right-6 w-12 h-12 rounded-full bg-sage text-appBg font-bold text-xl flex items-center justify-center shadow-lg hover:opacity-90 transition-all z-40 active:scale-95"
             title="Add entry"
           >
             {showComposer ? '✕' : '＋'}
@@ -474,7 +555,6 @@
                 </div>
 
                 <form onSubmit={handleAddManual} className="space-y-4">
-                  {/* Type Selector */}
                   <div className="grid grid-cols-2 gap-2 p-1 bg-appBg rounded-md border border-borderMuted">
                     <button
                       type="button"
@@ -488,7 +568,6 @@
                     >Deposit</button>
                   </div>
 
-                  {/* Amount */}
                   <div>
                     <label className="block text-[11px] text-secondaryText mb-1">Amount (₹)</label>
                     <input 
@@ -501,7 +580,6 @@
                     />
                   </div>
 
-                  {/* Note */}
                   <div>
                     <label className="block text-[11px] text-secondaryText mb-1">Note / Merchant</label>
                     <input 
@@ -513,7 +591,6 @@
                     />
                   </div>
 
-                  {/* Category */}
                   {manualType === 'EXPENSE' && (
                     <div>
                       <label className="block text-[11px] text-secondaryText mb-1">Category</label>
