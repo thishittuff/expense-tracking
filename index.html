@@ -3,8 +3,6 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>Financial Journal</title>
   
   <!-- Tailwind CSS -->
@@ -19,10 +17,10 @@
             surface: '#171A1F',
             borderMuted: '#2A2F36',
             primaryText: '#F5F5F4',
-            secondaryText: '#8B9097',
-            sage: '#6F8A76',
-            incomeColor: '#7A9477',
-            expenseColor: '#A77B6A'
+            secondaryText: '#9CA3AF',
+            sage: '#10B981',
+            incomeColor: '#10B981',
+            expenseColor: '#F43F5E'
           }
         }
       }
@@ -46,7 +44,6 @@
       color: #F5F5F4;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       -webkit-tap-highlight-color: transparent;
-      overscroll-behavior-y: contain; /* Smooth pull-to-refresh handling */
     }
     .no-scrollbar::-webkit-scrollbar { display: none; }
     .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
@@ -58,27 +55,41 @@
   <script type="text/babel">
     const { useState, useEffect, useRef } = React;
 
-    // Configuration
     const SUPABASE_URL = "https://jzawibejjqkvkbshxekf.supabase.co";
     const SUPABASE_ANON_KEY = "sb_publishable_7jW23phEPFm60I7rJvKudg_YmDElTi3";
-    const USER_ID = "aca8bd82-7e0f-4e78-84ac-7967d76dd24b";
-
     const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+    const CATEGORIES = ["General", "Food & Dining", "Shopping", "Transport", "Groceries / Local Store", "Self Transfer", "Utilities"];
+
+    const CATEGORY_COLOR_MAP = {
+      "General": "#06B6D4",
+      "Food & Dining": "#F59E0B",
+      "Shopping": "#EC4899",
+      "Transport": "#F43F5E",
+      "Groceries / Local Store": "#8B5CF6",
+      "Self Transfer": "#10B981",
+      "Utilities": "#3B82F6",
+      "Uncategorized": "#6B7280"
+    };
+
     function App() {
+      const [users, setUsers] = useState([]);
+      const [activeUser, setActiveUser] = useState(null);
+      const [selectedLoginUser, setSelectedLoginUser] = useState(null);
+      const [enteredPin, setEnteredPin] = useState('');
+      const [pinError, setPinError] = useState('');
+      const [isLoading, setIsLoading] = useState(true);
+
       const [transactions, setTransactions] = useState([]);
       const [totals, setTotals] = useState({ netBalance: 0, spentToday: 0, totalExpenses: 0, totalDeposits: 0 });
       const [liveNotification, setLiveNotification] = useState(null);
       const [filter, setFilter] = useState('ALL');
+      const [chartTimeframe, setChartTimeframe] = useState('MONTH'); // 'WEEK' (7 days), 'MONTH' (30 days), 'ALL'
+      const [selectedHeatmapDay, setSelectedHeatmapDay] = useState(null);
+      
       const [showComposer, setShowComposer] = useState(false);
       const [expandedTxId, setExpandedTxId] = useState(null);
-      const [isRefreshing, setIsRefreshing] = useState(false);
       
-      // Pull-to-refresh touch state
-      const [touchStartY, setTouchStartY] = useState(0);
-      const [pullDistance, setPullDistance] = useState(0);
-
-      // Form state
       const [manualAmount, setManualAmount] = useState('');
       const [manualNote, setManualNote] = useState('');
       const [manualCategory, setManualCategory] = useState('General');
@@ -87,6 +98,49 @@
       const chartRef = useRef(null);
       const chartInstance = useRef(null);
 
+      useEffect(() => {
+        const initSession = async () => {
+          setIsLoading(true);
+          const { data, error } = await supabase.from('user_configs').select('*');
+          if (!error && data) {
+            setUsers(data);
+            const storedUserId = localStorage.getItem('journal_logged_user_id');
+            if (storedUserId) {
+              const matched = data.find(u => String(u.user_id) === String(storedUserId));
+              if (matched) setActiveUser(matched);
+            }
+          }
+          setIsLoading(false);
+        };
+        initSession();
+      }, []);
+
+      const handleLogin = (e) => {
+        e.preventDefault();
+        setPinError('');
+        if (!selectedLoginUser) {
+          setPinError('Please select a profile.');
+          return;
+        }
+
+        const userPin = selectedLoginUser.pin ? String(selectedLoginUser.pin) : '1234';
+        if (String(enteredPin).trim() === userPin.trim()) {
+          setActiveUser(selectedLoginUser);
+          localStorage.setItem('journal_logged_user_id', selectedLoginUser.user_id);
+          setEnteredPin('');
+        } else {
+          setPinError('Incorrect PIN. Please try again.');
+        }
+      };
+
+      const handleLogout = () => {
+        localStorage.removeItem('journal_logged_user_id');
+        setActiveUser(null);
+        setSelectedLoginUser(null);
+        setEnteredPin('');
+        setTransactions([]);
+      };
+
       const getGreeting = () => {
         const hour = new Date().getHours();
         if (hour < 12) return "Good morning";
@@ -94,76 +148,23 @@
         return "Good evening";
       };
 
-      // Data Fetching
       const fetchData = async () => {
-        setIsRefreshing(true);
-        try {
-          const [expRes, depRes] = await Promise.all([
-            supabase.from('expenses').select('*').eq('user_id', USER_ID).order('created_at', { ascending: false }),
-            supabase.from('deposits').select('*').eq('user_id', USER_ID).order('created_at', { ascending: false })
-          ]);
+        if (!activeUser) return;
 
-          const expenses = (expRes.data || []).map(item => ({ ...item, type: 'EXPENSE' }));
-          const deposits = (depRes.data || []).map(item => ({ ...item, type: 'DEPOSIT' }));
+        const [expRes, depRes] = await Promise.all([
+          supabase.from('expenses').select('*').eq('user_id', activeUser.user_id).order('created_at', { ascending: false }),
+          supabase.from('deposits').select('*').eq('user_id', activeUser.user_id).order('created_at', { ascending: false })
+        ]);
 
-          const combined = [...expenses, ...deposits].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-          
-          setTransactions(combined);
-          calculateMetrics(combined);
-        } catch (err) {
-          console.error("Fetch error:", err);
-        } finally {
-          setTimeout(() => setIsRefreshing(false), 300);
-        }
+        const expenses = (expRes.data || []).map(item => ({ ...item, type: 'EXPENSE' }));
+        const deposits = (depRes.data || []).map(item => ({ ...item, type: 'DEPOSIT' }));
+
+        const combined = [...expenses, ...deposits].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+        
+        setTransactions(combined);
+        calculateMetrics(combined);
       };
 
-      // Auto-refresh when returning to app on iOS Standalone mode
-      useEffect(() => {
-        const handleVisibilityChange = () => {
-          if (document.visibilityState === 'visible') {
-            fetchData();
-          }
-        };
-
-        const handleFocus = () => {
-          fetchData();
-        };
-
-        document.addEventListener('visibilitychange', handleVisibilityChange);
-        window.addEventListener('focus', handleFocus);
-
-        return () => {
-          document.removeEventListener('visibilitychange', handleVisibilityChange);
-          window.removeEventListener('focus', handleFocus);
-        };
-      }, []);
-
-      // Touch handlers for Pull-to-Refresh
-      const handleTouchStart = (e) => {
-        if (window.scrollY === 0) {
-          setTouchStartY(e.touches[0].clientY);
-        }
-      };
-
-      const handleTouchMove = (e) => {
-        if (window.scrollY === 0 && touchStartY > 0) {
-          const currentY = e.touches[0].clientY;
-          const distance = currentY - touchStartY;
-          if (distance > 0) {
-            setPullDistance(Math.min(distance, 80));
-          }
-        }
-      };
-
-      const handleTouchEnd = () => {
-        if (pullDistance >= 60) {
-          fetchData();
-        }
-        setTouchStartY(0);
-        setPullDistance(0);
-      };
-
-      // Calculate totals
       const calculateMetrics = (data) => {
         const todayStr = new Date().toDateString();
         let todaySpent = 0;
@@ -190,30 +191,37 @@
         });
       };
 
-      // Delete Entry
       const handleDelete = async (id, type) => {
         if (!confirm("Remove this entry?")) return;
         const table = type === 'EXPENSE' ? 'expenses' : 'deposits';
         const { error } = await supabase.from(table).delete().eq('id', id);
-        
-        if (!error) {
-          setTransactions(prev => {
-            const updated = prev.filter(item => item.id !== id);
-            calculateMetrics(updated);
-            return updated;
-          });
+        if (!error) fetchData();
+      };
+
+      const handleCategoryChange = async (id, type, newCategory) => {
+        if (type !== 'EXPENSE') return;
+
+        setTransactions(prev => prev.map(item => item.id === id ? { ...item, category: newCategory } : item));
+
+        const { error } = await supabase
+          .from('expenses')
+          .update({ category: newCategory })
+          .eq('id', id);
+
+        if (error) {
+          console.error("Failed to update category in Supabase:", error);
+          fetchData();
         }
       };
 
-      // Add Entry
       const handleAddManual = async (e) => {
         e.preventDefault();
-        if (!manualAmount) return;
+        if (!manualAmount || !activeUser) return;
 
         const table = manualType === 'EXPENSE' ? 'expenses' : 'deposits';
         const payload = manualType === 'EXPENSE' 
-          ? { user_id: USER_ID, amount: parseFloat(manualAmount), note: manualNote || 'Expense', category: manualCategory }
-          : { user_id: USER_ID, amount: parseFloat(manualAmount), note: manualNote || 'Deposit' };
+          ? { user_id: activeUser.user_id, amount: parseFloat(manualAmount), note: manualNote || 'Expense', category: manualCategory }
+          : { user_id: activeUser.user_id, amount: parseFloat(manualAmount), note: manualNote || 'Deposit' };
 
         const { data, error } = await supabase.from(table).insert(payload).select();
         if (!error && data) {
@@ -224,48 +232,69 @@
         }
       };
 
-      // Supabase Realtime Listener
       useEffect(() => {
+        if (!activeUser) return;
         fetchData();
 
         const channel = supabase
-          .channel('realtime_finance')
-          .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'expenses' }, (payload) => {
-            handleRealtimeInsert({ ...payload.new, type: 'EXPENSE' });
+          .channel(`realtime_user_${activeUser.user_id}`)
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'expenses' }, (payload) => {
+            if (payload.new?.user_id === activeUser.user_id || payload.old?.user_id === activeUser.user_id) {
+              if (payload.eventType === 'INSERT') {
+                if (navigator.vibrate) navigator.vibrate([80, 40]);
+                setLiveNotification(`+ ₹${payload.new.amount} (${payload.new.note || 'Expense'})`);
+                setTimeout(() => setLiveNotification(null), 4000);
+              }
+              fetchData();
+            }
           })
-          .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'deposits' }, (payload) => {
-            handleRealtimeInsert({ ...payload.new, type: 'DEPOSIT' });
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'deposits' }, (payload) => {
+            if (payload.new?.user_id === activeUser.user_id || payload.old?.user_id === activeUser.user_id) {
+              if (payload.eventType === 'INSERT') {
+                if (navigator.vibrate) navigator.vibrate([80, 40]);
+                setLiveNotification(`+ ₹${payload.new.amount} (${payload.new.note || 'Deposit'})`);
+                setTimeout(() => setLiveNotification(null), 4000);
+              }
+              fetchData();
+            }
           })
           .subscribe();
 
         return () => { supabase.removeChannel(channel); };
-      }, []);
+      }, [activeUser]);
 
-      const handleRealtimeInsert = (newItem) => {
-        if (navigator.vibrate) navigator.vibrate([80, 40]);
-
-        setLiveNotification(`+ ₹${newItem.amount} (${newItem.note || 'Entry'})`);
-        setTimeout(() => setLiveNotification(null), 4000);
-
-        setTransactions(prev => {
-          const updated = [newItem, ...prev];
-          calculateMetrics(updated);
-          return updated;
-        });
-      };
-
-      // Chart Rendering
+      // Doughnut Chart Render (Rolling 7 days for Week, Rolling 30 days for Month)
       useEffect(() => {
-        if (!chartRef.current) return;
+        if (!chartRef.current || !activeUser) return;
+
+        const now = new Date();
+
+        const filteredExpenses = transactions.filter(t => {
+          if (t.type !== 'EXPENSE') return false;
+          const tDate = new Date(t.created_at);
+
+          if (chartTimeframe === 'WEEK') {
+            const cutoff = new Date(now);
+            cutoff.setDate(now.getDate() - 7);
+            return tDate >= cutoff;
+          }
+          if (chartTimeframe === 'MONTH') {
+            const cutoff = new Date(now);
+            cutoff.setDate(now.getDate() - 30); // Rolling 30 days ensures Week is a true subset of Month
+            return tDate >= cutoff;
+          }
+          return true; // 'ALL'
+        });
 
         const categoryTotals = {};
-        transactions.filter(t => t.type === 'EXPENSE').forEach(t => {
+        filteredExpenses.forEach(t => {
           const cat = t.category || 'General';
           categoryTotals[cat] = (categoryTotals[cat] || 0) + Number(t.amount);
         });
 
         const labels = Object.keys(categoryTotals);
         const data = Object.values(categoryTotals);
+        const backgroundColors = labels.map(cat => CATEGORY_COLOR_MAP[cat] || '#9CA3AF');
 
         if (chartInstance.current) chartInstance.current.destroy();
 
@@ -276,10 +305,9 @@
             labels: labels.length ? labels : ['No Data'],
             datasets: [{
               data: data.length ? data : [1],
-              backgroundColor: labels.length 
-                ? ['#6F8A76', '#A77B6A', '#8B9097', '#2A2F36', '#484E57'] 
-                : ['#2A2F36'],
-              borderWidth: 0
+              backgroundColor: labels.length ? backgroundColors : ['#2A2F36'],
+              borderWidth: 2,
+              borderColor: '#171A1F'
             }]
           },
           options: {
@@ -288,15 +316,20 @@
             plugins: {
               legend: { 
                 position: 'bottom', 
-                labels: { color: '#8B9097', font: { size: 11 }, boxWidth: 8, usePointStyle: true } 
+                labels: { 
+                  color: '#E2E8F0',
+                  font: { size: 10, weight: '500' }, 
+                  boxWidth: 8, 
+                  usePointStyle: true,
+                  padding: 10
+                } 
               }
             },
-            cutout: '80%'
+            cutout: '72%'
           }
         });
-      }, [transactions]);
+      }, [transactions, activeUser, chartTimeframe]);
 
-      // Timeline Grouping
       const groupTransactionsByDate = (txs) => {
         const groups = {};
         const todayStr = new Date().toDateString();
@@ -318,7 +351,6 @@
         return groups;
       };
 
-      // Heatmap Data
       const getHeatmapData = () => {
         const days = [];
         const today = new Date();
@@ -327,15 +359,82 @@
           d.setDate(today.getDate() - i);
           const dateStr = d.toDateString();
           const dayName = d.toLocaleDateString('en-US', { weekday: 'narrow' });
+          const fullDate = d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
           
           const daySpend = transactions
             .filter(t => t.type === 'EXPENSE' && new Date(t.created_at).toDateString() === dateStr)
             .reduce((sum, t) => sum + Number(t.amount || 0), 0);
             
-          days.push({ dayName, spend: daySpend });
+          days.push({ dayName, spend: daySpend, dateStr, fullDate });
         }
         return days;
       };
+
+      if (isLoading) {
+        return <div className="min-h-screen flex items-center justify-center bg-appBg text-secondaryText text-xs">Loading...</div>;
+      }
+
+      if (!activeUser) {
+        return (
+          <div className="min-h-screen flex items-center justify-center p-5 bg-appBg">
+            <div className="w-full max-w-sm bg-surface border border-borderMuted p-6 rounded-xl shadow-2xl">
+              <h1 className="text-base font-medium text-primaryText mb-1 text-center">Financial Journal</h1>
+              <p className="text-xs text-secondaryText text-center mb-6">Select profile and enter PIN to unlock</p>
+
+              <form onSubmit={handleLogin} className="space-y-5">
+                <div>
+                  <label className="block text-[11px] font-medium text-secondaryText mb-2">Select Account</label>
+                  <div className="grid grid-cols-2 gap-2">
+                    {users.map(u => {
+                      const isSelected = selectedLoginUser?.user_id === u.user_id;
+                      return (
+                        <button
+                          key={u.user_id}
+                          type="button"
+                          onClick={() => { setSelectedLoginUser(u); setPinError(''); }}
+                          className={`p-3 text-left rounded-lg border text-xs font-medium transition-all ${
+                            isSelected 
+                              ? 'bg-sage/10 border-sage text-primaryText' 
+                              : 'bg-appBg border-borderMuted text-secondaryText hover:border-secondaryText'
+                          }`}
+                        >
+                          {u.name}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {selectedLoginUser && (
+                  <div>
+                    <label className="block text-[11px] font-medium text-secondaryText mb-1">Enter Security PIN</label>
+                    <input 
+                      type="password" 
+                      maxLength="6"
+                      required
+                      placeholder="••••"
+                      value={enteredPin}
+                      onChange={(e) => setEnteredPin(e.target.value)}
+                      className="w-full bg-appBg border border-borderMuted text-center text-lg tracking-widest text-primaryText rounded-lg py-2 focus:outline-none focus:border-sage"
+                      autoFocus
+                    />
+                  </div>
+                )}
+
+                {pinError && <p className="text-[11px] text-expenseColor text-center">{pinError}</p>}
+
+                <button 
+                  type="submit" 
+                  disabled={!selectedLoginUser}
+                  className="w-full bg-sage text-appBg font-medium py-2.5 rounded-lg text-xs hover:opacity-90 disabled:opacity-40 transition-all"
+                >
+                  Unlock Dashboard
+                </button>
+              </form>
+            </div>
+          </div>
+        );
+      }
 
       const filteredTransactions = transactions.filter(t => {
         if (filter === 'EXPENSES') return t.type === 'EXPENSE';
@@ -347,23 +446,8 @@
       const heatmap = getHeatmapData();
 
       return (
-        <div 
-          className="max-w-2xl mx-auto px-5 py-8 md:py-14 pb-28 min-h-screen"
-          onTouchStart={handleTouchStart}
-          onTouchMove={handleTouchMove}
-          onTouchEnd={handleTouchEnd}
-        >
-          {/* Pull Indicator for Mobile */}
-          {pullDistance > 0 && (
-            <div 
-              className="flex justify-center items-center py-2 text-xs text-secondaryText transition-all"
-              style={{ height: `${pullDistance}px`, opacity: pullDistance / 60 }}
-            >
-              <span>{pullDistance >= 60 ? "Release to refresh..." : "Pull to refresh"}</span>
-            </div>
-          )}
-
-          {/* Toast Notification */}
+        <div className="max-w-2xl mx-auto px-5 py-8 md:py-14 pb-28">
+          
           {liveNotification && (
             <div className="fixed top-6 left-1/2 -translate-x-1/2 bg-surface border border-borderMuted text-primaryText text-xs px-4 py-2.5 rounded-lg shadow-xl z-50 flex items-center gap-2">
               <span className="w-2 h-2 rounded-full bg-sage animate-pulse"></span>
@@ -371,43 +455,36 @@
             </div>
           )}
 
-          {/* Dynamic Greeting Header */}
           <header className="mb-10 flex items-center justify-between">
             <div>
-              <h1 className="text-sm font-medium text-secondaryText tracking-wide">{getGreeting()}</h1>
-              <p className="text-xs text-secondaryText/70 mt-0.5">
+              <div className="flex items-center gap-2">
+                <h1 className="text-sm font-medium text-secondaryText tracking-wide">{getGreeting()}, {activeUser.name}</h1>
+                <button 
+                  onClick={handleLogout}
+                  className="text-[10px] text-secondaryText/80 hover:text-expenseColor border border-borderMuted px-1.5 py-0.5 rounded transition-colors"
+                  title="Lock dashboard"
+                >
+                  Lock
+                </button>
+              </div>
+
+              <p className="text-xs text-secondaryText/90 mt-1">
                 {totals.spentToday > 0 ? `You've spent ₹${totals.spentToday.toLocaleString('en-IN')} today.` : 'Today is quieter so far.'}
               </p>
             </div>
-            
-            <div className="flex items-center gap-2">
-              {/* Refresh Button */}
-              <button 
-                onClick={fetchData}
-                disabled={isRefreshing}
-                className="p-1.5 rounded-md text-secondaryText hover:text-primaryText border border-borderMuted/60 bg-surface/50 active:scale-95 transition-all"
-                title="Refresh data"
-              >
-                <svg className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-sage' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
-                </svg>
-              </button>
 
-              <div className="flex items-center gap-2 text-[11px] text-secondaryText border border-borderMuted px-2.5 py-1 rounded-md bg-surface/50">
-                <span className="w-1.5 h-1.5 rounded-full bg-sage"></span>
-                <span>Live</span>
-              </div>
+            <div className="flex items-center gap-2 text-[11px] text-secondaryText border border-borderMuted px-2.5 py-1 rounded-md bg-surface/50">
+              <span className="w-1.5 h-1.5 rounded-full bg-sage animate-pulse"></span>
+              <span>Live</span>
             </div>
           </header>
 
-          {/* Hero Section: Available Balance */}
           <section className="mb-12">
             <div className="text-xs font-medium text-secondaryText uppercase tracking-wider mb-1">Available Balance</div>
             <div className="text-4xl md:text-5xl font-light tracking-tight text-primaryText mb-8">
               ₹{totals.netBalance.toLocaleString('en-IN')}
             </div>
 
-            {/* Sub-stats */}
             <div className="grid grid-cols-3 gap-4 border-t border-b border-borderMuted/60 py-4">
               <div>
                 <div className="text-[11px] text-secondaryText">Spent Today</div>
@@ -424,36 +501,81 @@
             </div>
           </section>
 
-          {/* Heatmap & Category Breakdown */}
           <section className="grid grid-cols-1 sm:grid-cols-2 gap-6 mb-12">
-            <div className="bg-surface border border-borderMuted/60 p-4 rounded-lg">
-              <div className="text-xs font-medium text-secondaryText mb-3">7-Day Spending Activity</div>
-              <div className="flex items-center justify-between pt-2">
+            
+            {/* Mobile-Friendly Heatmap with Tap-to-Inspect */}
+            <div className="bg-surface border border-borderMuted/60 p-4 rounded-lg flex flex-col justify-between">
+              <div className="flex justify-between items-center mb-3">
+                <div className="text-xs font-medium text-secondaryText">7-Day Spending Activity</div>
+                {selectedHeatmapDay ? (
+                  <div className="text-[10px] font-medium text-sage bg-sage/10 px-2 py-0.5 rounded border border-sage/30">
+                    {selectedHeatmapDay.fullDate}: ₹{selectedHeatmapDay.spend.toLocaleString('en-IN')}
+                  </div>
+                ) : (
+                  <span className="text-[10px] text-secondaryText/70">Tap day to view</span>
+                )}
+              </div>
+
+              <div className="flex items-center justify-between pt-1">
                 {heatmap.map((item, idx) => {
                   let opacityClass = 'bg-borderMuted/40';
                   if (item.spend > 0) opacityClass = 'bg-expenseColor/40';
                   if (item.spend > 1000) opacityClass = 'bg-expenseColor/80';
                   if (item.spend > 3000) opacityClass = 'bg-expenseColor';
 
+                  const isSelected = selectedHeatmapDay?.dateStr === item.dateStr;
+
                   return (
-                    <div key={idx} className="flex flex-col items-center gap-1.5">
-                      <div className={`w-6 h-6 rounded-md ${opacityClass} transition-colors`} title={`₹${item.spend}`}></div>
-                      <span className="text-[10px] text-secondaryText">{item.dayName}</span>
-                    </div>
+                    <button
+                      key={idx}
+                      type="button"
+                      onClick={() => setSelectedHeatmapDay(isSelected ? null : item)}
+                      className="flex flex-col items-center gap-1 focus:outline-none cursor-pointer group"
+                    >
+                      <div className={`w-7 h-7 rounded-md ${opacityClass} flex items-center justify-center transition-all ${isSelected ? 'ring-2 ring-sage scale-110' : 'group-active:scale-95'}`}>
+                      </div>
+                      <span className="text-[10px] text-secondaryText font-medium">{item.dayName}</span>
+                      <span className="text-[9px] text-secondaryText/80 font-mono">₹{item.spend > 0 ? item.spend : 0}</span>
+                    </button>
                   );
                 })}
               </div>
             </div>
 
+            {/* Expense Breakdown */}
             <div className="bg-surface border border-borderMuted/60 p-4 rounded-lg flex flex-col justify-between">
-              <div className="text-xs font-medium text-secondaryText mb-1">Expense Breakdown</div>
-              <div className="h-24 relative flex items-center justify-center my-1">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-xs font-medium text-secondaryText">Expense Breakdown</div>
+                
+                <div className="flex gap-1 bg-appBg/60 p-0.5 rounded border border-borderMuted/80 text-[10px]">
+                  <button
+                    onClick={() => setChartTimeframe('WEEK')}
+                    className={`px-1.5 py-0.5 rounded ${chartTimeframe === 'WEEK' ? 'bg-surface text-primaryText font-medium' : 'text-secondaryText hover:text-primaryText'}`}
+                  >
+                    Week
+                  </button>
+                  <button
+                    onClick={() => setChartTimeframe('MONTH')}
+                    className={`px-1.5 py-0.5 rounded ${chartTimeframe === 'MONTH' ? 'bg-surface text-primaryText font-medium' : 'text-secondaryText hover:text-primaryText'}`}
+                  >
+                    Month
+                  </button>
+                  <button
+                    onClick={() => setChartTimeframe('ALL')}
+                    className={`px-1.5 py-0.5 rounded ${chartTimeframe === 'ALL' ? 'bg-surface text-primaryText font-medium' : 'text-secondaryText hover:text-primaryText'}`}
+                  >
+                    All
+                  </button>
+                </div>
+              </div>
+
+              <div className="h-36 relative flex items-center justify-center my-1">
                 <canvas ref={chartRef}></canvas>
               </div>
             </div>
           </section>
 
-          {/* Main Feed: Timeline Finance */}
+          {/* Timeline Feed */}
           <section>
             <div className="flex items-center justify-between mb-6">
               <h2 className="text-xs font-medium text-secondaryText uppercase tracking-wider">Journal Stream</h2>
@@ -496,32 +618,43 @@
                             onClick={() => setExpandedTxId(isExpanded ? null : item.id)}
                             className="group relative cursor-pointer bg-surface/30 hover:bg-surface border border-borderMuted/40 p-3 rounded-lg transition-all"
                           >
-                            <div className="flex items-center justify-between">
-                              <div className="flex items-center gap-2.5">
+                            <div className="flex items-center justify-between gap-2">
+                              
+                              <div className="flex items-center gap-2.5 min-w-0">
                                 <span className={`w-2 h-2 rounded-full flex-shrink-0 ${isExpense ? 'bg-expenseColor' : 'bg-incomeColor'}`}></span>
-                                <span className="text-sm font-medium text-primaryText">{item.note || (isExpense ? 'Expense' : 'Deposit')}</span>
+                                <span className="text-sm font-medium text-primaryText truncate">{item.note || (isExpense ? 'Expense' : 'Deposit')}</span>
+                                
+                                {isExpense && (
+                                  <select
+                                    value={item.category || 'General'}
+                                    onClick={(e) => e.stopPropagation()}
+                                    onChange={(e) => {
+                                      e.stopPropagation();
+                                      handleCategoryChange(item.id, item.type, e.target.value);
+                                    }}
+                                    className="bg-appBg border border-borderMuted/80 text-secondaryText hover:text-primaryText text-[10px] rounded px-2 py-0.5 focus:outline-none focus:border-sage cursor-pointer transition-colors"
+                                  >
+                                    {CATEGORIES.map(cat => (
+                                      <option key={cat} value={cat} className="bg-surface text-primaryText">{cat}</option>
+                                    ))}
+                                  </select>
+                                )}
                               </div>
                               
-                              <span className={`text-sm font-medium ${isExpense ? 'text-expenseColor' : 'text-incomeColor'}`}>
+                              <span className={`text-sm font-medium flex-shrink-0 ${isExpense ? 'text-expenseColor' : 'text-incomeColor'}`}>
                                 {isExpense ? '-' : '+'}₹{Number(item.amount).toLocaleString('en-IN')}
                               </span>
                             </div>
 
                             {isExpanded && (
-                              <div className="mt-3 pt-2 border-t border-borderMuted/40 flex items-center justify-between text-xs text-secondaryText">
-                                <div className="flex items-center gap-3">
-                                  <span>{new Date(item.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                                  {isExpense && item.category && (
-                                    <span className="text-[10px] bg-borderMuted/60 text-primaryText px-1.5 py-0.5 rounded">
-                                      {item.category}
-                                    </span>
-                                  )}
-                                </div>
+                              <div className="mt-3 pt-3 border-t border-borderMuted/40 flex items-center justify-between text-xs text-secondaryText">
+                                <span>Recorded at {new Date(item.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+
                                 <button 
                                   onClick={(e) => { e.stopPropagation(); handleDelete(item.id, item.type); }}
                                   className="text-expenseColor hover:underline text-[11px]"
                                 >
-                                  Delete
+                                  Delete Entry
                                 </button>
                               </div>
                             )}
@@ -536,16 +669,16 @@
             )}
           </section>
 
-          {/* Floating Composer Toggle Button */}
+          {/* Floating Composer Button */}
           <button 
             onClick={() => setShowComposer(!showComposer)}
-            className="fixed bottom-6 right-6 w-12 h-12 rounded-full bg-sage text-appBg font-bold text-xl flex items-center justify-center shadow-lg hover:opacity-90 transition-all z-40 active:scale-95"
+            className="fixed bottom-6 right-6 w-12 h-12 rounded-full bg-sage text-appBg font-bold text-xl flex items-center justify-center shadow-lg hover:opacity-90 transition-all z-40"
             title="Add entry"
           >
             {showComposer ? '✕' : '＋'}
           </button>
 
-          {/* Floating Composer Form Modal */}
+          {/* Manual Entry Modal */}
           {showComposer && (
             <div className="fixed inset-0 bg-appBg/80 backdrop-blur-xs flex items-end sm:items-center justify-center p-4 z-50">
               <div className="bg-surface border border-borderMuted p-6 rounded-lg w-full max-w-md">
@@ -597,12 +730,11 @@
                       <select
                         value={manualCategory}
                         onChange={(e) => setManualCategory(e.target.value)}
-                        className="w-full bg-appBg border border-borderMuted rounded-md px-3 py-2 text-sm text-primaryText focus:outline-none focus:border-sage"
+                        className="w-full bg-appBg border border-borderMuted rounded-md px-3 py-2 text-sm text-primaryText focus:outline-none focus:border-sage cursor-pointer"
                       >
-                        <option value="Food & Dining">Food & Dining</option>
-                        <option value="Shopping">Shopping</option>
-                        <option value="Transport">Transport</option>
-                        <option value="General">General</option>
+                        {CATEGORIES.map(cat => (
+                          <option key={cat} value={cat}>{cat}</option>
+                        ))}
                       </select>
                     </div>
                   )}
