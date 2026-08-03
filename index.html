@@ -59,18 +59,60 @@
     const SUPABASE_ANON_KEY = "sb_publishable_7jW23phEPFm60I7rJvKudg_YmDElTi3";
     const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-    const CATEGORIES = ["General", "Food & Dining", "Shopping", "Transport", "Groceries / Local Store", "Self Transfer", "Utilities"];
+    const DEFAULT_CATEGORIES = [
+      "General", 
+      "Rent",
+      "Food & Dining", 
+      "Shopping / Local Merchant", 
+      "Transport", 
+      "Groceries / Local Store", 
+      "Self Transfer", 
+      "Utilities",
+      "Entertainment",
+      "Travel / Transportation",
+      "Person-to-Person Transfer",
+      "Bank Charges / Forex Charges",
+      "Mobile Recharge / Telecom",
+      "Gaming"
+    ];
 
     const CATEGORY_COLOR_MAP = {
       "General": "#06B6D4",
+      "Rent": "#6366F1",
       "Food & Dining": "#F59E0B",
-      "Shopping": "#EC4899",
+      "Shopping / Local Merchant": "#EC4899",
       "Transport": "#F43F5E",
       "Groceries / Local Store": "#8B5CF6",
       "Self Transfer": "#10B981",
       "Utilities": "#3B82F6",
+      "Entertainment": "#A855F7",
+      "Travel / Transportation": "#E11D48",
+      "Person-to-Person Transfer": "#14B8A6",
+      "Bank Charges / Forex Charges": "#64748B",
+      "Mobile Recharge / Telecom": "#38BDF8",
+      "Gaming": "#F97316",
+      "Other (<2%)": "#475569",
       "Uncategorized": "#6B7280"
     };
+
+    const getCategoryColor = (cat) => {
+      if (CATEGORY_COLOR_MAP[cat]) return CATEGORY_COLOR_MAP[cat];
+      let hash = 0;
+      for (let i = 0; i < cat.length; i++) {
+        hash = cat.charCodeAt(i) + ((hash << 5) - hash);
+      }
+      const c = (hash & 0x00FFFFFF).toString(16).toUpperCase();
+      return "#" + "00000".substring(0, 6 - c.length) + c;
+    };
+
+    const formatCompactAmount = (amt) => {
+      if (!amt || amt === 0) return '₹0';
+      if (amt >= 100000) return `₹${(amt / 100000).toFixed(1)}L`;
+      if (amt >= 1000) return `₹${(amt / 1000).toFixed(1)}k`;
+      return `₹${amt}`;
+    };
+
+    const INITIAL_VISIBLE_COUNT = 20;
 
     function App() {
       const [users, setUsers] = useState([]);
@@ -81,12 +123,36 @@
       const [isLoading, setIsLoading] = useState(true);
 
       const [transactions, setTransactions] = useState([]);
-      const [totals, setTotals] = useState({ netBalance: 0, spentToday: 0, totalExpenses: 0, totalDeposits: 0 });
       const [liveNotification, setLiveNotification] = useState(null);
       const [filter, setFilter] = useState('ALL');
-      const [chartTimeframe, setChartTimeframe] = useState('MONTH'); // 'WEEK' (7 days), 'MONTH' (30 days), 'ALL'
-      const [selectedHeatmapDay, setSelectedHeatmapDay] = useState(null);
+      const [selectedDateFilter, setSelectedDateFilter] = useState(null);
+
+      const [chartTimeframe, setChartTimeframe] = useState('MONTH');
+      const [summaryTimeframe, setSummaryTimeframe] = useState('WEEK');
       
+      const [categories, setCategories] = useState(() => {
+        const saved = localStorage.getItem('journal_categories');
+        return saved ? JSON.parse(saved) : DEFAULT_CATEGORIES;
+      });
+      const [showCatModal, setShowCatModal] = useState(false);
+      const [newCatInput, setNewCatInput] = useState('');
+
+      const [excludedTrendCategories, setExcludedTrendCategories] = useState([]);
+      const [showTrendFilterModal, setShowTrendFilterModal] = useState(false);
+
+      // Calendar state
+      const [showCalendarModal, setShowCalendarModal] = useState(false);
+      const [calViewDate, setCalViewDate] = useState(new Date());
+      
+      const [hideBalanceSetting, setHideBalanceSetting] = useState(true);
+      const [isBalanceRevealed, setIsBalanceRevealed] = useState(false);
+      const [showPinRevealModal, setShowPinRevealModal] = useState(false);
+      const [revealPin, setRevealPin] = useState('');
+      const [revealPinError, setRevealPinError] = useState('');
+      const [pendingPrivacyAction, setPendingPrivacyAction] = useState('REVEAL_ONLY');
+
+      const [visibleTxCount, setVisibleTxCount] = useState(INITIAL_VISIBLE_COUNT);
+
       const [showComposer, setShowComposer] = useState(false);
       const [expandedTxId, setExpandedTxId] = useState(null);
       
@@ -97,6 +163,11 @@
 
       const chartRef = useRef(null);
       const chartInstance = useRef(null);
+
+      const trendChartRef = useRef(null);
+      const trendChartInstance = useRef(null);
+
+      const [trendDaysData, setTrendDaysData] = useState([]);
 
       useEffect(() => {
         const initSession = async () => {
@@ -114,6 +185,82 @@
         };
         initSession();
       }, []);
+
+      useEffect(() => {
+        if (activeUser) {
+          const savedSetting = localStorage.getItem(`journal_hide_balance_${activeUser.user_id}`);
+          const isHidden = savedSetting !== null ? savedSetting === 'true' : true;
+          setHideBalanceSetting(isHidden);
+          setIsBalanceRevealed(!isHidden);
+
+          const savedTrendExclusions = localStorage.getItem(`journal_excluded_trend_cats_${activeUser.user_id}`);
+          if (savedTrendExclusions) {
+            try {
+              setExcludedTrendCategories(JSON.parse(savedTrendExclusions));
+            } catch (e) {
+              setExcludedTrendCategories([]);
+            }
+          } else {
+            setExcludedTrendCategories([]);
+          }
+        }
+      }, [activeUser]);
+
+      useEffect(() => {
+        setVisibleTxCount(INITIAL_VISIBLE_COUNT);
+      }, [filter, selectedDateFilter]);
+
+      const updateExcludedTrendCategories = (valOrFn) => {
+        setExcludedTrendCategories(prev => {
+          const next = typeof valOrFn === 'function' ? valOrFn(prev) : valOrFn;
+          if (activeUser) {
+            localStorage.setItem(`journal_excluded_trend_cats_${activeUser.user_id}`, JSON.stringify(next));
+          }
+          return next;
+        });
+      };
+
+      const saveCategories = (newCats) => {
+        setCategories(newCats);
+        localStorage.setItem('journal_categories', JSON.stringify(newCats));
+      };
+
+      const handleAddCategory = (e) => {
+        e.preventDefault();
+        const trimmed = newCatInput.trim();
+        if (!trimmed) return;
+        if (categories.some(c => c.toLowerCase() === trimmed.toLowerCase())) {
+          alert('Category already exists!');
+          return;
+        }
+        const updated = [...categories, trimmed];
+        saveCategories(updated);
+        setNewCatInput('');
+      };
+
+      const handleRemoveCategory = async (catToRemove) => {
+        if (catToRemove === 'General') {
+          alert('Cannot remove default "General" category.');
+          return;
+        }
+        if (!confirm(`Remove category "${catToRemove}"? Any existing entries using this category will be changed to "General".`)) return;
+
+        const updated = categories.filter(c => c !== catToRemove);
+        saveCategories(updated);
+
+        if (activeUser) {
+          const { error } = await supabase
+            .from('expenses')
+            .update({ category: 'General' })
+            .eq('user_id', activeUser.user_id)
+            .eq('category', catToRemove);
+
+          if (error) console.error("Error updating category in database:", error);
+          fetchData();
+        }
+
+        updateExcludedTrendCategories(prev => prev.filter(c => c !== catToRemove));
+      };
 
       const handleLogin = (e) => {
         e.preventDefault();
@@ -141,6 +288,43 @@
         setTransactions([]);
       };
 
+      const handleTogglePrivacy = () => {
+        if (hideBalanceSetting) {
+          setPendingPrivacyAction('TURN_OFF_SETTING');
+          setShowPinRevealModal(true);
+        } else {
+          setHideBalanceSetting(true);
+          setIsBalanceRevealed(false);
+          if (activeUser) {
+            localStorage.setItem(`journal_hide_balance_${activeUser.user_id}`, 'true');
+          }
+        }
+      };
+
+      const handleOpenRevealModal = () => {
+        setPendingPrivacyAction('REVEAL_ONLY');
+        setShowPinRevealModal(true);
+      };
+
+      const handleVerifyRevealPin = (e) => {
+        e.preventDefault();
+        setRevealPinError('');
+        const userPin = activeUser.pin ? String(activeUser.pin) : '1234';
+        if (String(revealPin).trim() === userPin.trim()) {
+          setIsBalanceRevealed(true);
+          if (pendingPrivacyAction === 'TURN_OFF_SETTING') {
+            setHideBalanceSetting(false);
+            if (activeUser) {
+              localStorage.setItem(`journal_hide_balance_${activeUser.user_id}`, 'false');
+            }
+          }
+          setShowPinRevealModal(false);
+          setRevealPin('');
+        } else {
+          setRevealPinError('Incorrect PIN. Try again.');
+        }
+      };
+
       const getGreeting = () => {
         const hour = new Date().getHours();
         if (hour < 12) return "Good morning";
@@ -160,36 +344,57 @@
         const deposits = (depRes.data || []).map(item => ({ ...item, type: 'DEPOSIT' }));
 
         const combined = [...expenses, ...deposits].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-        
         setTransactions(combined);
-        calculateMetrics(combined);
       };
 
-      const calculateMetrics = (data) => {
-        const todayStr = new Date().toDateString();
-        let todaySpent = 0;
-        let totalExp = 0;
-        let totalDep = 0;
+      const calculateMetrics = () => {
+        const now = new Date();
+        const todayStr = now.toDateString();
+        
+        let spentToday = 0;
+        let overallExp = 0;
+        let overallDep = 0;
+        let summaryExp = 0;
+        let summaryDep = 0;
 
-        data.forEach(item => {
-          const itemDate = new Date(item.created_at).toDateString();
+        transactions.forEach(item => {
+          const tDate = new Date(item.created_at);
           const amt = Number(item.amount) || 0;
+          const isExpense = item.type === 'EXPENSE';
 
-          if (item.type === 'EXPENSE') {
-            totalExp += amt;
-            if (itemDate === todayStr) todaySpent += amt;
-          } else {
-            totalDep += amt;
+          if (isExpense) overallExp += amt;
+          else overallDep += amt;
+
+          if (isExpense && tDate.toDateString() === todayStr) {
+            spentToday += amt;
+          }
+
+          let includeInSummary = true;
+          if (summaryTimeframe === 'WEEK') {
+            const cutoff = new Date(now);
+            cutoff.setDate(now.getDate() - 7);
+            includeInSummary = tDate >= cutoff;
+          } else if (summaryTimeframe === 'MONTH') {
+            const cutoff = new Date(now);
+            cutoff.setDate(now.getDate() - 30);
+            includeInSummary = tDate >= cutoff;
+          }
+
+          if (includeInSummary) {
+            if (isExpense) summaryExp += amt;
+            else summaryDep += amt;
           }
         });
 
-        setTotals({ 
-          netBalance: totalDep - totalExp,
-          spentToday: todaySpent, 
-          totalExpenses: totalExp, 
-          totalDeposits: totalDep 
-        });
+        return {
+          netBalance: overallDep - overallExp,
+          spentToday,
+          summaryExpenses: summaryExp,
+          summaryDeposits: summaryDep
+        };
       };
+
+      const metrics = calculateMetrics();
 
       const handleDelete = async (id, type) => {
         if (!confirm("Remove this entry?")) return;
@@ -232,6 +437,14 @@
         }
       };
 
+      const loadJournalForDate = (dateStr) => {
+        setSelectedDateFilter(dateStr);
+        setTimeout(() => {
+          const el = document.getElementById('journal-stream');
+          if (el) el.scrollIntoView({ behavior: 'smooth' });
+        }, 100);
+      };
+
       useEffect(() => {
         if (!activeUser) return;
         fetchData();
@@ -263,7 +476,7 @@
         return () => { supabase.removeChannel(channel); };
       }, [activeUser]);
 
-      // Doughnut Chart Render (Rolling 7 days for Week, Rolling 30 days for Month)
+      // Doughnut Chart Render
       useEffect(() => {
         if (!chartRef.current || !activeUser) return;
 
@@ -280,21 +493,40 @@
           }
           if (chartTimeframe === 'MONTH') {
             const cutoff = new Date(now);
-            cutoff.setDate(now.getDate() - 30); // Rolling 30 days ensures Week is a true subset of Month
+            cutoff.setDate(now.getDate() - 30);
             return tDate >= cutoff;
           }
-          return true; // 'ALL'
+          return true;
         });
 
         const categoryTotals = {};
+        let totalExpenseSum = 0;
+
         filteredExpenses.forEach(t => {
           const cat = t.category || 'General';
-          categoryTotals[cat] = (categoryTotals[cat] || 0) + Number(t.amount);
+          const amt = Number(t.amount) || 0;
+          categoryTotals[cat] = (categoryTotals[cat] || 0) + amt;
+          totalExpenseSum += amt;
         });
 
-        const labels = Object.keys(categoryTotals);
-        const data = Object.values(categoryTotals);
-        const backgroundColors = labels.map(cat => CATEGORY_COLOR_MAP[cat] || '#9CA3AF');
+        const finalCategoryTotals = {};
+        let otherTotal = 0;
+
+        Object.entries(categoryTotals).forEach(([cat, amt]) => {
+          if (totalExpenseSum > 0 && (amt / totalExpenseSum) < 0.02 && Object.keys(categoryTotals).length > 2) {
+            otherTotal += amt;
+          } else {
+            finalCategoryTotals[cat] = amt;
+          }
+        });
+
+        if (otherTotal > 0) {
+          finalCategoryTotals["Other (<2%)"] = otherTotal;
+        }
+
+        const labels = Object.keys(finalCategoryTotals);
+        const data = Object.values(finalCategoryTotals);
+        const backgroundColors = labels.map(cat => getCategoryColor(cat));
 
         if (chartInstance.current) chartInstance.current.destroy();
 
@@ -306,8 +538,8 @@
             datasets: [{
               data: data.length ? data : [1],
               backgroundColor: labels.length ? backgroundColors : ['#2A2F36'],
-              borderWidth: 2,
-              borderColor: '#171A1F'
+              borderWidth: 0,
+              borderColor: 'transparent'
             }]
           },
           options: {
@@ -318,17 +550,119 @@
                 position: 'bottom', 
                 labels: { 
                   color: '#E2E8F0',
-                  font: { size: 10, weight: '500' }, 
-                  boxWidth: 8, 
+                  font: { size: 9, weight: '500' }, 
+                  boxWidth: 6, 
                   usePointStyle: true,
-                  padding: 10
+                  padding: 6
                 } 
               }
             },
-            cutout: '72%'
+            cutout: '68%'
           }
         });
       }, [transactions, activeUser, chartTimeframe]);
+
+      // 7-Day Trend Line Graph & Activity Cubes Calculation
+      useEffect(() => {
+        if (!trendChartRef.current || !activeUser) return;
+
+        const days = [];
+        const amounts = [];
+        const dayDetails = [];
+        const today = new Date();
+
+        for (let i = 6; i >= 0; i--) {
+          const d = new Date();
+          d.setDate(today.getDate() - i);
+          const dateStr = d.toDateString();
+          const dayLabel = d.toLocaleDateString('en-US', { weekday: 'narrow' });
+          const fullDayLabel = d.toLocaleDateString('en-US', { weekday: 'short' });
+          
+          const daySpend = transactions
+            .filter(t => {
+              if (t.type !== 'EXPENSE') return false;
+              if (new Date(t.created_at).toDateString() !== dateStr) return false;
+              
+              const cat = t.category || 'General';
+              if (excludedTrendCategories.includes(cat)) {
+                return false;
+              }
+              return true;
+            })
+            .reduce((sum, t) => sum + Number(t.amount || 0), 0);
+
+          days.push(dayLabel);
+          amounts.push(daySpend);
+          dayDetails.push({
+            dayLabel,
+            fullDayLabel,
+            dateStr,
+            spend: daySpend
+          });
+        }
+
+        setTrendDaysData(dayDetails);
+
+        if (trendChartInstance.current) trendChartInstance.current.destroy();
+
+        const ctx = trendChartRef.current.getContext('2d');
+        const gradient = ctx.createLinearGradient(0, 0, 0, 140);
+        gradient.addColorStop(0, 'rgba(244, 63, 94, 0.35)');
+        gradient.addColorStop(1, 'rgba(244, 63, 94, 0.0)');
+
+        trendChartInstance.current = new Chart(ctx, {
+          type: 'line',
+          data: {
+            labels: days,
+            datasets: [{
+              label: 'Daily Spend',
+              data: amounts,
+              borderColor: '#F43F5E',
+              borderWidth: 2,
+              pointBackgroundColor: '#F43F5E',
+              pointBorderColor: '#171A1F',
+              pointBorderWidth: 1.5,
+              pointRadius: 3,
+              pointHoverRadius: 5,
+              tension: 0.35,
+              fill: true,
+              backgroundColor: gradient
+            }]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: { display: false },
+              tooltip: {
+                backgroundColor: '#101214',
+                borderColor: '#2A2F36',
+                borderWidth: 1,
+                titleColor: '#9CA3AF',
+                bodyColor: '#F5F5F4',
+                callbacks: {
+                  label: (ctx) => ` Spent: ₹${ctx.parsed.y.toLocaleString('en-IN')}`
+                }
+              }
+            },
+            scales: {
+              x: {
+                grid: { display: false },
+                ticks: { color: '#9CA3AF', font: { size: 10, weight: '500' } }
+              },
+              y: {
+                grid: { color: '#2A2F36', drawBorder: false },
+                ticks: { 
+                  color: '#6B7280', 
+                  font: { size: 8 },
+                  callback: (val) => val >= 1000 ? `₹${(val/1000).toFixed(1)}k` : `₹${val}`
+                },
+                beginAtZero: true
+              }
+            }
+          }
+        });
+      }, [transactions, activeUser, excludedTrendCategories]);
 
       const groupTransactionsByDate = (txs) => {
         const groups = {};
@@ -351,23 +685,41 @@
         return groups;
       };
 
-      const getHeatmapData = () => {
-        const days = [];
-        const today = new Date();
-        for (let i = 6; i >= 0; i--) {
-          const d = new Date();
-          d.setDate(today.getDate() - i);
-          const dateStr = d.toDateString();
-          const dayName = d.toLocaleDateString('en-US', { weekday: 'narrow' });
-          const fullDate = d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
-          
-          const daySpend = transactions
-            .filter(t => t.type === 'EXPENSE' && new Date(t.created_at).toDateString() === dateStr)
-            .reduce((sum, t) => sum + Number(t.amount || 0), 0);
-            
-          days.push({ dayName, spend: daySpend, dateStr, fullDate });
+      const getCubeBg = (spend, maxSpend) => {
+        if (spend <= 0) return 'bg-borderMuted/30 border-borderMuted/60';
+        if (maxSpend <= 0) return 'bg-expenseColor/40 border-expenseColor/60';
+        const ratio = spend / maxSpend;
+        if (ratio > 0.7) return 'bg-expenseColor border-expenseColor shadow-sm';
+        if (ratio > 0.3) return 'bg-expenseColor/70 border-expenseColor/80';
+        return 'bg-expenseColor/40 border-expenseColor/60';
+      };
+
+      // Calendar Helper calculations
+      const calYear = calViewDate.getFullYear();
+      const calMonth = calViewDate.getMonth();
+      const daysInCalMonth = new Date(calYear, calMonth + 1, 0).getDate();
+      const firstDayOffset = new Date(calYear, calMonth, 1).getDay();
+
+      const changeCalMonth = (offset) => {
+        setCalViewDate(new Date(calYear, calMonth + offset, 1));
+      };
+
+      const getDailySpendForCal = (day) => {
+        const targetDateStr = new Date(calYear, calMonth, day).toDateString();
+        return transactions
+          .filter(t => t.type === 'EXPENSE' && new Date(t.created_at).toDateString() === targetDateStr)
+          .reduce((sum, t) => sum + Number(t.amount || 0), 0);
+      };
+
+      const handleCalendarDateClick = (day) => {
+        const targetDate = new Date(calYear, calMonth, day);
+        const dateStr = targetDate.toDateString();
+        const formatted = targetDate.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+        
+        if (window.confirm(`Load Journal stream for ${formatted}?`)) {
+          setShowCalendarModal(false);
+          loadJournalForDate(dateStr);
         }
-        return days;
       };
 
       if (isLoading) {
@@ -437,13 +789,20 @@
       }
 
       const filteredTransactions = transactions.filter(t => {
-        if (filter === 'EXPENSES') return t.type === 'EXPENSE';
-        if (filter === 'DEPOSITS') return t.type === 'DEPOSIT';
+        if (filter === 'EXPENSES' && t.type !== 'EXPENSE') return false;
+        if (filter === 'DEPOSITS' && t.type !== 'DEPOSIT') return false;
+        if (selectedDateFilter) {
+          const tDateStr = new Date(t.created_at).toDateString();
+          if (tDateStr !== selectedDateFilter) return false;
+        }
         return true;
       });
 
-      const groupedTransactions = groupTransactionsByDate(filteredTransactions);
-      const heatmap = getHeatmapData();
+      const paginatedTransactions = filteredTransactions.slice(0, visibleTxCount);
+      const groupedTransactions = groupTransactionsByDate(paginatedTransactions);
+      const isBalanceMasked = hideBalanceSetting && !isBalanceRevealed;
+
+      const maxTrendSpend = Math.max(...trendDaysData.map(d => d.spend), 1);
 
       return (
         <div className="max-w-2xl mx-auto px-5 py-8 md:py-14 pb-28">
@@ -469,81 +828,172 @@
               </div>
 
               <p className="text-xs text-secondaryText/90 mt-1">
-                {totals.spentToday > 0 ? `You've spent ₹${totals.spentToday.toLocaleString('en-IN')} today.` : 'Today is quieter so far.'}
+                {metrics.spentToday > 0 ? `You've spent ₹${metrics.spentToday.toLocaleString('en-IN')} today.` : 'Today is quieter so far.'}
               </p>
             </div>
 
-            <div className="flex items-center gap-2 text-[11px] text-secondaryText border border-borderMuted px-2.5 py-1 rounded-md bg-surface/50">
-              <span className="w-1.5 h-1.5 rounded-full bg-sage animate-pulse"></span>
-              <span>Live</span>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setShowCatModal(true)}
+                className="text-[11px] text-secondaryText hover:text-primaryText border border-borderMuted px-2.5 py-1 rounded-md bg-surface/50 hover:bg-surface transition-colors"
+              >
+                ⚙️ Categories
+              </button>
+              <div className="flex items-center gap-1.5 text-[11px] text-secondaryText border border-borderMuted px-2.5 py-1 rounded-md bg-surface/50">
+                <span className="w-1.5 h-1.5 rounded-full bg-sage animate-pulse"></span>
+                <span>Live</span>
+              </div>
             </div>
           </header>
 
+          {/* Balance & Summary Metrics */}
           <section className="mb-12">
-            <div className="text-xs font-medium text-secondaryText uppercase tracking-wider mb-1">Available Balance</div>
-            <div className="text-4xl md:text-5xl font-light tracking-tight text-primaryText mb-8">
-              ₹{totals.netBalance.toLocaleString('en-IN')}
+            <div className="flex items-center justify-between mb-1">
+              <div className="text-xs font-medium text-secondaryText uppercase tracking-wider">Available Balance</div>
+              
+              <div className="flex items-center gap-2">
+                {hideBalanceSetting && isBalanceRevealed && (
+                  <button 
+                    onClick={() => setIsBalanceRevealed(false)}
+                    className="text-[10px] text-sage hover:underline"
+                  >
+                    Hide Again
+                  </button>
+                )}
+                <button 
+                  onClick={handleTogglePrivacy}
+                  className="text-[11px] text-secondaryText hover:text-primaryText flex items-center gap-1 border border-borderMuted px-2 py-0.5 rounded transition-colors cursor-pointer"
+                >
+                  {hideBalanceSetting ? '🔒 Hide Balance: ON' : '🔓 Hide Balance: OFF'}
+                </button>
+              </div>
             </div>
 
-            <div className="grid grid-cols-3 gap-4 border-t border-b border-borderMuted/60 py-4">
-              <div>
-                <div className="text-[11px] text-secondaryText">Spent Today</div>
-                <div className="text-sm font-medium text-primaryText mt-0.5">₹{totals.spentToday.toLocaleString('en-IN')}</div>
+            <div className="mb-8">
+              {isBalanceMasked ? (
+                <button 
+                  onClick={handleOpenRevealModal}
+                  className="group flex items-center gap-3 text-4xl md:text-5xl font-light tracking-tight text-secondaryText/60 hover:text-primaryText transition-colors cursor-pointer"
+                >
+                  <span className="tracking-widest">₹ • • • • •</span>
+                  <span className="text-xs font-medium text-sage border border-sage/30 bg-sage/10 px-2 py-1 rounded group-hover:bg-sage group-hover:text-appBg transition-all">
+                    Click to Reveal
+                  </span>
+                </button>
+              ) : (
+                <div className="text-4xl md:text-5xl font-light tracking-tight text-primaryText">
+                  ₹{metrics.netBalance.toLocaleString('en-IN')}
+                </div>
+              )}
+            </div>
+
+            {/* Income & Expenses Row */}
+            <div className="border-t border-b border-borderMuted/60 py-4">
+              <div className="flex items-center justify-between mb-3">
+                <span className="text-[11px] font-medium text-secondaryText uppercase tracking-wider">Financial Overview</span>
+                <div className="flex gap-1 bg-appBg/60 p-0.5 rounded border border-borderMuted/80 text-[10px]">
+                  {['WEEK', 'MONTH', 'ALL'].map((tf) => (
+                    <button
+                      key={tf}
+                      onClick={() => setSummaryTimeframe(tf)}
+                      className={`px-2 py-0.5 rounded transition-colors ${
+                        summaryTimeframe === tf ? 'bg-surface text-primaryText font-medium' : 'text-secondaryText hover:text-primaryText'
+                      }`}
+                    >
+                      {tf === 'WEEK' ? 'Week' : tf === 'MONTH' ? 'Month' : 'All Time'}
+                    </button>
+                  ))}
+                </div>
               </div>
-              <div>
-                <div className="text-[11px] text-secondaryText">Income</div>
-                <div className="text-sm font-medium text-incomeColor mt-0.5">₹{totals.totalDeposits.toLocaleString('en-IN')}</div>
-              </div>
-              <div>
-                <div className="text-[11px] text-secondaryText">Expenses</div>
-                <div className="text-sm font-medium text-expenseColor mt-0.5">₹{totals.totalExpenses.toLocaleString('en-IN')}</div>
+
+              <div className="grid grid-cols-3 gap-4">
+                <div>
+                  <div className="text-[11px] text-secondaryText">Spent Today</div>
+                  <div className="text-sm font-medium text-primaryText mt-0.5">₹{metrics.spentToday.toLocaleString('en-IN')}</div>
+                </div>
+                <div>
+                  <div className="text-[11px] text-secondaryText">Income ({summaryTimeframe.toLowerCase()})</div>
+                  <div className="text-sm font-medium text-incomeColor mt-0.5">₹{metrics.summaryDeposits.toLocaleString('en-IN')}</div>
+                </div>
+                <div>
+                  <div className="text-[11px] text-secondaryText">Expenses ({summaryTimeframe.toLowerCase()})</div>
+                  <div className="text-sm font-medium text-expenseColor mt-0.5">₹{metrics.summaryExpenses.toLocaleString('en-IN')}</div>
+                </div>
               </div>
             </div>
           </section>
 
+          {/* Charts Section: Pie Chart Above Line Graph on Mobile via CSS Order */}
           <section className="grid grid-cols-1 sm:grid-cols-2 gap-6 mb-12">
             
-            {/* Mobile-Friendly Heatmap with Tap-to-Inspect */}
-            <div className="bg-surface border border-borderMuted/60 p-4 rounded-lg flex flex-col justify-between">
-              <div className="flex justify-between items-center mb-3">
-                <div className="text-xs font-medium text-secondaryText">7-Day Spending Activity</div>
-                {selectedHeatmapDay ? (
-                  <div className="text-[10px] font-medium text-sage bg-sage/10 px-2 py-0.5 rounded border border-sage/30">
-                    {selectedHeatmapDay.fullDate}: ₹{selectedHeatmapDay.spend.toLocaleString('en-IN')}
-                  </div>
-                ) : (
-                  <span className="text-[10px] text-secondaryText/70">Tap day to view</span>
-                )}
+            {/* 7-Day Trend Line Graph & Activity Cubes (Order 2 on mobile, Order 1 on sm+) */}
+            <div className="order-2 sm:order-1 bg-surface border border-borderMuted/60 p-4 rounded-lg flex flex-col justify-between min-h-[280px]">
+              <div className="flex justify-between items-center mb-2">
+                <div className="text-xs font-medium text-secondaryText">7-Day Activity Trend</div>
+                
+                <button
+                  onClick={() => setShowTrendFilterModal(true)}
+                  className={`text-[10px] border px-2 py-0.5 rounded transition-colors flex items-center gap-1 ${
+                    excludedTrendCategories.length > 0
+                      ? 'bg-expenseColor/20 text-expenseColor border-expenseColor/40 font-medium' 
+                      : 'bg-appBg border-borderMuted text-secondaryText hover:text-primaryText'
+                  }`}
+                  title="Filter categories from line chart"
+                >
+                  <span>🏷️ Filter Chart</span>
+                  {excludedTrendCategories.length > 0 && (
+                    <span className="bg-expenseColor text-appBg font-bold text-[9px] px-1 rounded-full">
+                      {excludedTrendCategories.length}
+                    </span>
+                  )}
+                </button>
               </div>
 
-              <div className="flex items-center justify-between pt-1">
-                {heatmap.map((item, idx) => {
-                  let opacityClass = 'bg-borderMuted/40';
-                  if (item.spend > 0) opacityClass = 'bg-expenseColor/40';
-                  if (item.spend > 1000) opacityClass = 'bg-expenseColor/80';
-                  if (item.spend > 3000) opacityClass = 'bg-expenseColor';
+              {/* Line Chart */}
+              <div className="relative w-full flex-1 flex items-center justify-center min-h-[130px] p-1 overflow-hidden">
+                <canvas ref={trendChartRef}></canvas>
+              </div>
 
-                  const isSelected = selectedHeatmapDay?.dateStr === item.dateStr;
+              {/* Cubes Row with Clickable Day Action */}
+              <div className="mt-3 pt-3 border-t border-borderMuted/40">
+                <div className="text-[10px] text-secondaryText mb-2 flex justify-between items-center">
+                  <span>Daily Activity Intensity</span>
+                  <span className="text-[9px] text-sage/80 font-medium">Click square to load day</span>
+                </div>
 
-                  return (
-                    <button
-                      key={idx}
-                      type="button"
-                      onClick={() => setSelectedHeatmapDay(isSelected ? null : item)}
-                      className="flex flex-col items-center gap-1 focus:outline-none cursor-pointer group"
-                    >
-                      <div className={`w-7 h-7 rounded-md ${opacityClass} flex items-center justify-center transition-all ${isSelected ? 'ring-2 ring-sage scale-110' : 'group-active:scale-95'}`}>
-                      </div>
-                      <span className="text-[10px] text-secondaryText font-medium">{item.dayName}</span>
-                      <span className="text-[9px] text-secondaryText/80 font-mono">₹{item.spend > 0 ? item.spend : 0}</span>
-                    </button>
-                  );
-                })}
+                <div className="grid grid-cols-7 gap-1.5 text-center">
+                  {trendDaysData.map((d, idx) => {
+                    const isSelected = selectedDateFilter === d.dateStr;
+                    return (
+                      <button 
+                        key={idx} 
+                        onClick={() => loadJournalForDate(d.dateStr)}
+                        className={`flex flex-col items-center gap-1 group relative cursor-pointer p-1 rounded-md transition-all ${
+                          isSelected ? 'ring-2 ring-sage bg-sage/10' : 'hover:bg-appBg/60'
+                        }`}
+                        title={`Click to load journal stream for ${d.fullDayLabel} (${d.dateStr})`}
+                      >
+                        {/* Visual Activity Cube */}
+                        <div 
+                          className={`w-full h-8 sm:h-9 rounded-md border transition-all ${getCubeBg(d.spend, maxTrendSpend)} group-hover:scale-105`}
+                        />
+                        
+                        {/* Day Label & Explicit Amount */}
+                        <div className="flex flex-col items-center leading-none mt-0.5 w-full">
+                          <span className={`text-[10px] font-medium ${isSelected ? 'text-sage font-bold' : 'text-secondaryText/90'}`}>{d.dayLabel}</span>
+                          <span className="text-[9px] font-semibold text-primaryText/90 mt-1 truncate w-full tracking-tighter">
+                            {formatCompactAmount(d.spend)}
+                          </span>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
             </div>
 
-            {/* Expense Breakdown */}
-            <div className="bg-surface border border-borderMuted/60 p-4 rounded-lg flex flex-col justify-between">
+            {/* Expense Breakdown Doughnut Chart (Order 1 on mobile, Order 2 on sm+) */}
+            <div className="order-1 sm:order-2 bg-surface border border-borderMuted/60 p-4 rounded-lg flex flex-col justify-between min-h-[280px]">
               <div className="flex items-center justify-between mb-2">
                 <div className="text-xs font-medium text-secondaryText">Expense Breakdown</div>
                 
@@ -569,16 +1019,31 @@
                 </div>
               </div>
 
-              <div className="h-36 relative flex items-center justify-center my-1">
+              <div className="relative w-full flex-1 flex items-center justify-center min-h-[160px] p-1 overflow-hidden">
                 <canvas ref={chartRef}></canvas>
               </div>
             </div>
+
           </section>
 
           {/* Timeline Feed */}
-          <section>
-            <div className="flex items-center justify-between mb-6">
-              <h2 className="text-xs font-medium text-secondaryText uppercase tracking-wider">Journal Stream</h2>
+          <section id="journal-stream">
+            <div className="flex items-center justify-between mb-6 flex-wrap gap-2">
+              <div className="flex items-center gap-2">
+                <h2 className="text-xs font-medium text-secondaryText uppercase tracking-wider">Journal Stream</h2>
+                {selectedDateFilter && (
+                  <div className="flex items-center gap-1.5 bg-sage/10 border border-sage/30 text-sage text-[10px] px-2 py-0.5 rounded-full font-medium">
+                    <span>📅 {new Date(selectedDateFilter).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}</span>
+                    <button 
+                      onClick={() => setSelectedDateFilter(null)}
+                      className="hover:text-primaryText font-bold ml-1"
+                      title="Clear date filter"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                )}
+              </div>
               
               <div className="flex gap-2 text-xs">
                 {['ALL', 'EXPENSES', 'DEPOSITS'].map((tab) => (
@@ -596,7 +1061,19 @@
             </div>
 
             {Object.keys(groupedTransactions).length === 0 ? (
-              <div className="text-center py-12 text-secondaryText text-xs">No entries recorded.</div>
+              <div className="text-center py-12 text-secondaryText text-xs bg-surface/20 rounded-lg border border-borderMuted/40">
+                No entries recorded {selectedDateFilter ? 'for this date' : ''}.
+                {selectedDateFilter && (
+                  <div className="mt-2">
+                    <button 
+                      onClick={() => setSelectedDateFilter(null)} 
+                      className="text-sage hover:underline text-xs"
+                    >
+                      Show all entries
+                    </button>
+                  </div>
+                )}
+              </div>
             ) : (
               <div className="relative border-l border-borderMuted/80 pl-6 space-y-8 ml-2">
                 {Object.entries(groupedTransactions).map(([dateLabel, items]) => (
@@ -634,7 +1111,7 @@
                                     }}
                                     className="bg-appBg border border-borderMuted/80 text-secondaryText hover:text-primaryText text-[10px] rounded px-2 py-0.5 focus:outline-none focus:border-sage cursor-pointer transition-colors"
                                   >
-                                    {CATEGORIES.map(cat => (
+                                    {categories.map(cat => (
                                       <option key={cat} value={cat} className="bg-surface text-primaryText">{cat}</option>
                                     ))}
                                   </select>
@@ -667,9 +1144,255 @@
                 ))}
               </div>
             )}
+
+            {/* Pagination Controls */}
+            {filteredTransactions.length > visibleTxCount && (
+              <div className="text-center mt-8 pt-4 border-t border-borderMuted/40">
+                <button
+                  onClick={() => setVisibleTxCount(prev => prev + INITIAL_VISIBLE_COUNT)}
+                  className="px-4 py-2 bg-surface hover:bg-borderMuted/40 border border-borderMuted text-secondaryText hover:text-primaryText text-xs font-medium rounded-lg transition-all"
+                >
+                  Load More Entries ({filteredTransactions.length - visibleTxCount} remaining)
+                </button>
+              </div>
+            )}
           </section>
 
-          {/* Floating Composer Button */}
+          {/* Manage Categories Modal */}
+          {showCatModal && (
+            <div className="fixed inset-0 bg-appBg/80 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+              <div className="bg-surface border border-borderMuted p-6 rounded-lg w-full max-w-sm shadow-2xl flex flex-col max-h-[85vh]">
+                <div className="flex justify-between items-center mb-4">
+                  <h3 className="text-sm font-medium text-primaryText">Manage Categories</h3>
+                  <button onClick={() => setShowCatModal(false)} className="text-secondaryText hover:text-primaryText text-xs">✕</button>
+                </div>
+
+                <form onSubmit={handleAddCategory} className="flex gap-2 mb-4">
+                  <input 
+                    type="text" 
+                    placeholder="New category name..."
+                    value={newCatInput}
+                    onChange={(e) => setNewCatInput(e.target.value)}
+                    className="flex-1 bg-appBg border border-borderMuted rounded-md px-3 py-1.5 text-xs text-primaryText focus:outline-none focus:border-sage"
+                  />
+                  <button 
+                    type="submit" 
+                    className="bg-sage text-appBg px-3 py-1.5 rounded-md text-xs font-medium hover:opacity-90"
+                  >
+                    Add
+                  </button>
+                </form>
+
+                <div className="overflow-y-auto space-y-2 pr-1 flex-1 no-scrollbar">
+                  {categories.map((cat) => (
+                    <div key={cat} className="flex items-center justify-between p-2 rounded bg-appBg/60 border border-borderMuted/60 text-xs">
+                      <div className="flex items-center gap-2">
+                        <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: getCategoryColor(cat) }}></span>
+                        <span className="text-primaryText font-medium">{cat}</span>
+                      </div>
+                      
+                      {cat !== 'General' ? (
+                        <button 
+                          onClick={() => handleRemoveCategory(cat)}
+                          className="text-expenseColor hover:text-rose-400 text-xs px-2 py-0.5 rounded border border-expenseColor/20 hover:border-expenseColor"
+                          title="Delete category"
+                        >
+                          Remove
+                        </button>
+                      ) : (
+                        <span className="text-[10px] text-secondaryText italic">Default</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Line Chart Filter Modal */}
+          {showTrendFilterModal && (
+            <div className="fixed inset-0 bg-appBg/80 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+              <div className="bg-surface border border-borderMuted p-6 rounded-lg w-full max-w-sm shadow-2xl flex flex-col max-h-[85vh]">
+                <div className="flex justify-between items-center mb-2">
+                  <h3 className="text-sm font-medium text-primaryText">Filter Line Chart</h3>
+                  <button onClick={() => setShowTrendFilterModal(false)} className="text-secondaryText hover:text-primaryText text-xs">✕</button>
+                </div>
+                <p className="text-[11px] text-secondaryText mb-4">Uncheck categories to exclude them from the 7-day trend chart.</p>
+
+                <div className="flex justify-between items-center text-xs text-sage mb-3">
+                  <button onClick={() => updateExcludedTrendCategories([])} className="hover:underline">Select All</button>
+                  <button onClick={() => updateExcludedTrendCategories(categories.filter(c => c !== 'General'))} className="hover:underline text-expenseColor">Exclude All (except General)</button>
+                </div>
+
+                <div className="overflow-y-auto space-y-2 pr-1 flex-1 no-scrollbar mb-4">
+                  {categories.map((cat) => {
+                    const isExcluded = excludedTrendCategories.includes(cat);
+                    return (
+                      <label 
+                        key={cat} 
+                        className={`flex items-center justify-between p-2 rounded border cursor-pointer text-xs transition-colors ${
+                          !isExcluded ? 'bg-appBg/80 border-borderMuted text-primaryText' : 'bg-appBg/20 border-borderMuted/30 text-secondaryText/50 line-through'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <input 
+                            type="checkbox" 
+                            checked={!isExcluded}
+                            onChange={() => {
+                              updateExcludedTrendCategories(prev => 
+                                isExcluded ? prev.filter(c => c !== cat) : [...prev, cat]
+                              );
+                            }}
+                            className="rounded border-borderMuted text-sage focus:ring-0"
+                          />
+                          <span>{cat}</span>
+                        </div>
+                        <span className="w-2 h-2 rounded-full" style={{ backgroundColor: getCategoryColor(cat) }}></span>
+                      </label>
+                    );
+                  })}
+                </div>
+
+                <button 
+                  onClick={() => setShowTrendFilterModal(false)} 
+                  className="w-full bg-sage text-appBg py-2 rounded-md text-xs font-medium hover:opacity-90"
+                >
+                  Done
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Calendar Spending Modal */}
+          {showCalendarModal && (
+            <div className="fixed inset-0 bg-appBg/80 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+              <div className="bg-surface border border-borderMuted p-5 rounded-lg w-full max-w-sm shadow-2xl">
+                {/* Header Navigation */}
+                <div className="flex justify-between items-center mb-4">
+                  <button 
+                    onClick={() => changeCalMonth(-1)}
+                    className="text-secondaryText hover:text-primaryText text-sm px-2 py-1 rounded border border-borderMuted bg-appBg"
+                  >
+                    ◀
+                  </button>
+                  <h3 className="text-xs font-medium text-primaryText">
+                    {calViewDate.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}
+                  </h3>
+                  <button 
+                    onClick={() => changeCalMonth(1)}
+                    className="text-secondaryText hover:text-primaryText text-sm px-2 py-1 rounded border border-borderMuted bg-appBg"
+                  >
+                    ▶
+                  </button>
+                </div>
+
+                {/* Days Header */}
+                <div className="grid grid-cols-7 gap-1 text-center mb-2">
+                  {['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'].map(d => (
+                    <span key={d} className="text-[10px] font-medium text-secondaryText/70">{d}</span>
+                  ))}
+                </div>
+
+                {/* Days Grid */}
+                <div className="grid grid-cols-7 gap-1 text-center">
+                  {/* Blank slots before 1st of month */}
+                  {Array.from({ length: firstDayOffset }).map((_, i) => (
+                    <div key={`blank-${i}`} className="h-12"></div>
+                  ))}
+
+                  {/* Day Cells */}
+                  {Array.from({ length: daysInCalMonth }).map((_, i) => {
+                    const day = i + 1;
+                    const daySpend = getDailySpendForCal(day);
+                    const isToday = new Date().toDateString() === new Date(calYear, calMonth, day).toDateString();
+
+                    return (
+                      <button
+                        key={day}
+                        onClick={() => handleCalendarDateClick(day)}
+                        className={`h-12 flex flex-col items-center justify-center rounded-md border text-xs transition-all ${
+                          isToday 
+                            ? 'border-sage bg-sage/10 text-primaryText' 
+                            : 'border-borderMuted/40 bg-appBg/50 hover:bg-surface hover:border-secondaryText text-primaryText'
+                        }`}
+                      >
+                        <span className="text-[10px] font-medium">{day}</span>
+                        <span className={`text-[8px] font-semibold mt-0.5 truncate w-full px-0.5 ${daySpend > 0 ? 'text-expenseColor' : 'text-secondaryText/40'}`}>
+                          {daySpend > 0 ? formatCompactAmount(daySpend) : '-'}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="mt-4 pt-3 border-t border-borderMuted/40 flex justify-between items-center">
+                  <span className="text-[10px] text-secondaryText">Click any date to load stream</span>
+                  <button 
+                    onClick={() => setShowCalendarModal(false)}
+                    className="bg-appBg border border-borderMuted text-secondaryText hover:text-primaryText px-3 py-1 rounded text-xs"
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Balance Reveal / Privacy Change PIN Modal */}
+          {showPinRevealModal && (
+            <div className="fixed inset-0 bg-appBg/80 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+              <div className="bg-surface border border-borderMuted p-6 rounded-lg w-full max-w-xs shadow-2xl">
+                <h3 className="text-sm font-medium text-primaryText text-center mb-1">Verify PIN</h3>
+                <p className="text-xs text-secondaryText text-center mb-4">
+                  {pendingPrivacyAction === 'TURN_OFF_SETTING' 
+                    ? 'Enter security PIN to disable hide balance mode' 
+                    : 'Enter security PIN to reveal your total balance'}
+                </p>
+
+                <form onSubmit={handleVerifyRevealPin} className="space-y-4">
+                  <input 
+                    type="password" 
+                    maxLength="6"
+                    required
+                    placeholder="••••"
+                    value={revealPin}
+                    onChange={(e) => setRevealPin(e.target.value)}
+                    className="w-full bg-appBg border border-borderMuted text-center text-lg tracking-widest text-primaryText rounded-lg py-2 focus:outline-none focus:border-sage"
+                    autoFocus
+                  />
+
+                  {revealPinError && <p className="text-[11px] text-expenseColor text-center">{revealPinError}</p>}
+
+                  <div className="flex gap-2">
+                    <button 
+                      type="button"
+                      onClick={() => { setShowPinRevealModal(false); setRevealPin(''); setRevealPinError(''); }}
+                      className="w-1/2 bg-appBg border border-borderMuted text-secondaryText py-2 rounded-md text-xs font-medium hover:text-primaryText"
+                    >
+                      Cancel
+                    </button>
+                    <button 
+                      type="submit" 
+                      className="w-1/2 bg-sage text-appBg py-2 rounded-md text-xs font-medium hover:opacity-90 transition-opacity"
+                    >
+                      Verify
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
+
+          {/* Floating Left Calendar Button */}
+          <button 
+            onClick={() => setShowCalendarModal(true)}
+            className="fixed bottom-6 left-6 w-12 h-12 rounded-full bg-surface border border-borderMuted text-primaryText font-medium text-lg flex items-center justify-center shadow-lg hover:bg-borderMuted/40 transition-all z-40"
+            title="Open Calendar Spending View"
+          >
+            📅
+          </button>
+
+          {/* Floating Right Entry Button */}
           <button 
             onClick={() => setShowComposer(!showComposer)}
             className="fixed bottom-6 right-6 w-12 h-12 rounded-full bg-sage text-appBg font-bold text-xl flex items-center justify-center shadow-lg hover:opacity-90 transition-all z-40"
@@ -732,7 +1455,7 @@
                         onChange={(e) => setManualCategory(e.target.value)}
                         className="w-full bg-appBg border border-borderMuted rounded-md px-3 py-2 text-sm text-primaryText focus:outline-none focus:border-sage cursor-pointer"
                       >
-                        {CATEGORIES.map(cat => (
+                        {categories.map(cat => (
                           <option key={cat} value={cat}>{cat}</option>
                         ))}
                       </select>
