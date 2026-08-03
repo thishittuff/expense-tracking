@@ -69,11 +69,9 @@
       "Self Transfer", 
       "Utilities",
       "Entertainment",
-      "Travel / Transportation",
       "Person-to-Person Transfer",
       "Bank Charges / Forex Charges",
-      "Mobile Recharge / Telecom",
-      "Gaming"
+      "Mobile Recharge / Telecom"
     ];
 
     const CATEGORY_COLOR_MAP = {
@@ -91,6 +89,8 @@
       "Bank Charges / Forex Charges": "#64748B",
       "Mobile Recharge / Telecom": "#38BDF8",
       "Gaming": "#F97316",
+      "Emergency Fund": "#22C55E",
+      "Investment": "#A855F7",
       "Other (<2%)": "#475569",
       "Uncategorized": "#6B7280"
     };
@@ -130,17 +130,13 @@
       const [chartTimeframe, setChartTimeframe] = useState('MONTH');
       const [summaryTimeframe, setSummaryTimeframe] = useState('WEEK');
       
-      const [categories, setCategories] = useState(() => {
-        const saved = localStorage.getItem('journal_categories');
-        return saved ? JSON.parse(saved) : DEFAULT_CATEGORIES;
-      });
+      const [categories, setCategories] = useState([]);
       const [showCatModal, setShowCatModal] = useState(false);
       const [newCatInput, setNewCatInput] = useState('');
 
       const [excludedTrendCategories, setExcludedTrendCategories] = useState([]);
       const [showTrendFilterModal, setShowTrendFilterModal] = useState(false);
 
-      // Calendar state
       const [showCalendarModal, setShowCalendarModal] = useState(false);
       const [calViewDate, setCalViewDate] = useState(new Date());
       
@@ -203,12 +199,35 @@
           } else {
             setExcludedTrendCategories([]);
           }
+
+          fetchCategories();
+          fetchData();
         }
       }, [activeUser]);
 
       useEffect(() => {
         setVisibleTxCount(INITIAL_VISIBLE_COUNT);
       }, [filter, selectedDateFilter]);
+
+      const fetchCategories = async () => {
+        if (!activeUser) return;
+        const { data, error } = await supabase
+          .from('categories')
+          .select('name')
+          .eq('user_id', activeUser.user_id)
+          .order('created_at', { ascending: true });
+
+        if (!error && data && data.length > 0) {
+          setCategories(data.map(c => c.name));
+        } else if (!error && data && data.length === 0) {
+          const defaultRows = DEFAULT_CATEGORIES.map(name => ({
+            user_id: activeUser.user_id,
+            name
+          }));
+          await supabase.from('categories').insert(defaultRows);
+          setCategories(DEFAULT_CATEGORIES);
+        }
+      };
 
       const updateExcludedTrendCategories = (valOrFn) => {
         setExcludedTrendCategories(prev => {
@@ -220,22 +239,26 @@
         });
       };
 
-      const saveCategories = (newCats) => {
-        setCategories(newCats);
-        localStorage.setItem('journal_categories', JSON.stringify(newCats));
-      };
-
-      const handleAddCategory = (e) => {
+      const handleAddCategory = async (e) => {
         e.preventDefault();
         const trimmed = newCatInput.trim();
-        if (!trimmed) return;
+        if (!trimmed || !activeUser) return;
+
         if (categories.some(c => c.toLowerCase() === trimmed.toLowerCase())) {
           alert('Category already exists!');
           return;
         }
-        const updated = [...categories, trimmed];
-        saveCategories(updated);
-        setNewCatInput('');
+
+        const { error } = await supabase
+          .from('categories')
+          .insert({ user_id: activeUser.user_id, name: trimmed });
+
+        if (!error) {
+          setNewCatInput('');
+          fetchCategories();
+        } else {
+          alert('Failed to add category to Supabase.');
+        }
       };
 
       const handleRemoveCategory = async (catToRemove) => {
@@ -245,21 +268,33 @@
         }
         if (!confirm(`Remove category "${catToRemove}"? Any existing entries using this category will be changed to "General".`)) return;
 
-        const updated = categories.filter(c => c !== catToRemove);
-        saveCategories(updated);
+        const { error: updateError } = await supabase
+          .from('expenses')
+          .update({ category: 'General' })
+          .eq('user_id', activeUser.user_id)
+          .eq('category', catToRemove);
 
-        if (activeUser) {
-          const { error } = await supabase
-            .from('expenses')
-            .update({ category: 'General' })
-            .eq('user_id', activeUser.user_id)
-            .eq('category', catToRemove);
-
-          if (error) console.error("Error updating category in database:", error);
-          fetchData();
+        if (updateError) {
+          console.error("Failed to reassign expenses in Supabase:", updateError);
+          alert("Error updating related expenses in database.");
+          return;
         }
 
+        const { error: deleteError } = await supabase
+          .from('categories')
+          .delete()
+          .eq('user_id', activeUser.user_id)
+          .eq('name', catToRemove);
+
+        if (deleteError) {
+          console.error("Failed to delete category from Supabase:", deleteError);
+          alert("Failed to delete category from Supabase.");
+          return;
+        }
+
+        setCategories(prev => prev.filter(c => c !== catToRemove));
         updateExcludedTrendCategories(prev => prev.filter(c => c !== catToRemove));
+        fetchData();
       };
 
       const handleLogin = (e) => {
@@ -286,6 +321,7 @@
         setSelectedLoginUser(null);
         setEnteredPin('');
         setTransactions([]);
+        setCategories([]);
       };
 
       const handleTogglePrivacy = () => {
@@ -447,7 +483,6 @@
 
       useEffect(() => {
         if (!activeUser) return;
-        fetchData();
 
         const channel = supabase
           .channel(`realtime_user_${activeUser.user_id}`)
@@ -471,12 +506,16 @@
               fetchData();
             }
           })
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'categories' }, (payload) => {
+            if (payload.new?.user_id === activeUser.user_id || payload.old?.user_id === activeUser.user_id) {
+              fetchCategories();
+            }
+          })
           .subscribe();
 
         return () => { supabase.removeChannel(channel); };
       }, [activeUser]);
 
-      // Doughnut Chart Render
       useEffect(() => {
         if (!chartRef.current || !activeUser) return;
 
@@ -562,7 +601,6 @@
         });
       }, [transactions, activeUser, chartTimeframe]);
 
-      // 7-Day Trend Line Graph & Activity Cubes Calculation
       useEffect(() => {
         if (!trendChartRef.current || !activeUser) return;
 
@@ -694,7 +732,6 @@
         return 'bg-expenseColor/40 border-expenseColor/60';
       };
 
-      // Calendar Helper calculations
       const calYear = calViewDate.getFullYear();
       const calMonth = calViewDate.getMonth();
       const daysInCalMonth = new Date(calYear, calMonth + 1, 0).getDate();
@@ -801,11 +838,10 @@
       const paginatedTransactions = filteredTransactions.slice(0, visibleTxCount);
       const groupedTransactions = groupTransactionsByDate(paginatedTransactions);
       const isBalanceMasked = hideBalanceSetting && !isBalanceRevealed;
-
       const maxTrendSpend = Math.max(...trendDaysData.map(d => d.spend), 1);
 
       return (
-        <div className="max-w-2xl mx-auto px-5 py-8 md:py-14 pb-28">
+        <div className="max-w-2xl mx-auto px-4 sm:px-6 py-6 md:py-12 pb-28">
           
           {liveNotification && (
             <div className="fixed top-6 left-1/2 -translate-x-1/2 bg-surface border border-borderMuted text-primaryText text-xs px-4 py-2.5 rounded-lg shadow-xl z-50 flex items-center gap-2">
@@ -814,119 +850,135 @@
             </div>
           )}
 
-          <header className="mb-10 flex items-center justify-between">
-            <div>
+          {/* Refactored Responsive Header */}
+          <header className="mb-8">
+            {/* Top Bar Navigation Actions */}
+            <div className="flex items-center justify-between mb-4 pb-3 border-b border-borderMuted/40">
               <div className="flex items-center gap-2">
-                <h1 className="text-sm font-medium text-secondaryText tracking-wide">{getGreeting()}, {activeUser.name}</h1>
+                <span className="w-2 h-2 rounded-full bg-sage animate-pulse"></span>
+                <span className="text-[11px] font-semibold text-secondaryText tracking-wide uppercase">Live Sync</span>
+              </div>
+              
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setShowCatModal(true)}
+                  className="px-2.5 py-1.5 text-secondaryText hover:text-primaryText bg-surface border border-borderMuted/80 rounded-lg text-xs flex items-center gap-1.5 transition-colors"
+                  title="Manage Categories"
+                >
+                  <span>⚙️</span>
+                  <span className="hidden sm:inline text-[11px] font-medium">Categories</span>
+                </button>
+                
                 <button 
                   onClick={handleLogout}
-                  className="text-[10px] text-secondaryText/80 hover:text-expenseColor border border-borderMuted px-1.5 py-0.5 rounded transition-colors"
-                  title="Lock dashboard"
+                  className="px-2.5 py-1.5 text-secondaryText hover:text-expenseColor bg-surface border border-borderMuted/80 rounded-lg text-xs transition-colors flex items-center gap-1"
+                  title="Lock Dashboard"
                 >
-                  Lock
+                  <span>🔒</span>
+                  <span className="hidden sm:inline text-[11px] font-medium">Lock</span>
                 </button>
               </div>
-
-              <p className="text-xs text-secondaryText/90 mt-1">
-                {metrics.spentToday > 0 ? `You've spent ₹${metrics.spentToday.toLocaleString('en-IN')} today.` : 'Today is quieter so far.'}
-              </p>
             </div>
 
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => setShowCatModal(true)}
-                className="text-[11px] text-secondaryText hover:text-primaryText border border-borderMuted px-2.5 py-1 rounded-md bg-surface/50 hover:bg-surface transition-colors"
-              >
-                ⚙️ Categories
-              </button>
-              <div className="flex items-center gap-1.5 text-[11px] text-secondaryText border border-borderMuted px-2.5 py-1 rounded-md bg-surface/50">
-                <span className="w-1.5 h-1.5 rounded-full bg-sage animate-pulse"></span>
-                <span>Live</span>
-              </div>
+            {/* Greeting & Quick Insights */}
+            <div>
+              <h1 className="text-lg sm:text-xl font-semibold text-primaryText tracking-tight">
+                {getGreeting()}, <span className="text-sage">{activeUser.name}</span>
+              </h1>
+              <p className="text-xs text-secondaryText mt-1">
+                {metrics.spentToday > 0 ? (
+                  <>You've spent <span className="text-primaryText font-medium">₹{metrics.spentToday.toLocaleString('en-IN')}</span> today.</>
+                ) : (
+                  'No expenses logged today yet.'
+                )}
+              </p>
             </div>
           </header>
 
-          {/* Balance & Summary Metrics */}
-          <section className="mb-12">
-            <div className="flex items-center justify-between mb-1">
-              <div className="text-xs font-medium text-secondaryText uppercase tracking-wider">Available Balance</div>
+          {/* Refactored Balance Card */}
+          <section className="mb-10 bg-surface/40 border border-borderMuted/60 p-4 sm:p-5 rounded-2xl">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-[11px] font-semibold text-secondaryText uppercase tracking-wider">Available Balance</span>
               
-              <div className="flex items-center gap-2">
-                {hideBalanceSetting && isBalanceRevealed && (
-                  <button 
-                    onClick={() => setIsBalanceRevealed(false)}
-                    className="text-[10px] text-sage hover:underline"
-                  >
-                    Hide Again
-                  </button>
-                )}
-                <button 
-                  onClick={handleTogglePrivacy}
-                  className="text-[11px] text-secondaryText hover:text-primaryText flex items-center gap-1 border border-borderMuted px-2 py-0.5 rounded transition-colors cursor-pointer"
-                >
-                  {hideBalanceSetting ? '🔒 Hide Balance: ON' : '🔓 Hide Balance: OFF'}
-                </button>
-              </div>
+              <button 
+                onClick={handleTogglePrivacy}
+                className="text-[11px] text-secondaryText hover:text-primaryText flex items-center gap-1.5 bg-appBg/80 border border-borderMuted px-2.5 py-1 rounded-full transition-colors"
+              >
+                <span>{hideBalanceSetting ? '🔒' : '🔓'}</span>
+                <span>{hideBalanceSetting ? 'Hide ON' : 'Hide OFF'}</span>
+              </button>
             </div>
 
-            <div className="mb-8">
+            <div className="my-3">
               {isBalanceMasked ? (
                 <button 
                   onClick={handleOpenRevealModal}
-                  className="group flex items-center gap-3 text-4xl md:text-5xl font-light tracking-tight text-secondaryText/60 hover:text-primaryText transition-colors cursor-pointer"
+                  className="w-full text-left group flex items-center justify-between gap-2 p-2 -ml-2 rounded-xl hover:bg-appBg/40 transition-all cursor-pointer"
                 >
-                  <span className="tracking-widest">₹ • • • • •</span>
-                  <span className="text-xs font-medium text-sage border border-sage/30 bg-sage/10 px-2 py-1 rounded group-hover:bg-sage group-hover:text-appBg transition-all">
-                    Click to Reveal
+                  <span className="text-2xl sm:text-4xl font-light tracking-widest text-secondaryText/50 group-hover:text-secondaryText transition-colors">
+                    ₹ • • • • •
+                  </span>
+                  <span className="text-[11px] font-medium text-sage bg-sage/10 border border-sage/30 px-3 py-1.5 rounded-lg group-hover:bg-sage group-hover:text-appBg transition-all flex-shrink-0">
+                    Tap to Reveal
                   </span>
                 </button>
               ) : (
-                <div className="text-4xl md:text-5xl font-light tracking-tight text-primaryText">
-                  ₹{metrics.netBalance.toLocaleString('en-IN')}
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-3xl sm:text-4xl font-semibold tracking-tight text-primaryText">
+                    ₹{metrics.netBalance.toLocaleString('en-IN')}
+                  </div>
+                  {hideBalanceSetting && isBalanceRevealed && (
+                    <button 
+                      onClick={() => setIsBalanceRevealed(false)}
+                      className="text-[11px] text-secondaryText hover:text-sage border border-borderMuted bg-appBg/60 px-2.5 py-1 rounded-lg transition-colors"
+                    >
+                      Hide Again
+                    </button>
+                  )}
                 </div>
               )}
             </div>
 
-            {/* Income & Expenses Row */}
-            <div className="border-t border-b border-borderMuted/60 py-4">
+            {/* Income & Expenses Quick Stats */}
+            <div className="mt-4 pt-4 border-t border-borderMuted/60">
               <div className="flex items-center justify-between mb-3">
                 <span className="text-[11px] font-medium text-secondaryText uppercase tracking-wider">Financial Overview</span>
-                <div className="flex gap-1 bg-appBg/60 p-0.5 rounded border border-borderMuted/80 text-[10px]">
+                <div className="flex gap-1 bg-appBg/60 p-0.5 rounded-lg border border-borderMuted/80 text-[10px]">
                   {['WEEK', 'MONTH', 'ALL'].map((tf) => (
                     <button
                       key={tf}
                       onClick={() => setSummaryTimeframe(tf)}
-                      className={`px-2 py-0.5 rounded transition-colors ${
-                        summaryTimeframe === tf ? 'bg-surface text-primaryText font-medium' : 'text-secondaryText hover:text-primaryText'
+                      className={`px-2 py-0.5 rounded-md transition-colors ${
+                        summaryTimeframe === tf ? 'bg-surface text-primaryText font-medium shadow-xs' : 'text-secondaryText hover:text-primaryText'
                       }`}
                     >
-                      {tf === 'WEEK' ? 'Week' : tf === 'MONTH' ? 'Month' : 'All Time'}
+                      {tf === 'WEEK' ? 'Week' : tf === 'MONTH' ? 'Month' : 'All'}
                     </button>
                   ))}
                 </div>
               </div>
 
-              <div className="grid grid-cols-3 gap-4">
+              <div className="grid grid-cols-3 gap-2 sm:gap-4 text-left">
                 <div>
-                  <div className="text-[11px] text-secondaryText">Spent Today</div>
-                  <div className="text-sm font-medium text-primaryText mt-0.5">₹{metrics.spentToday.toLocaleString('en-IN')}</div>
+                  <div className="text-[10px] sm:text-[11px] text-secondaryText">Spent Today</div>
+                  <div className="text-xs sm:text-sm font-medium text-primaryText mt-0.5">₹{metrics.spentToday.toLocaleString('en-IN')}</div>
                 </div>
                 <div>
-                  <div className="text-[11px] text-secondaryText">Income ({summaryTimeframe.toLowerCase()})</div>
-                  <div className="text-sm font-medium text-incomeColor mt-0.5">₹{metrics.summaryDeposits.toLocaleString('en-IN')}</div>
+                  <div className="text-[10px] sm:text-[11px] text-secondaryText">Income</div>
+                  <div className="text-xs sm:text-sm font-medium text-incomeColor mt-0.5">₹{metrics.summaryDeposits.toLocaleString('en-IN')}</div>
                 </div>
                 <div>
-                  <div className="text-[11px] text-secondaryText">Expenses ({summaryTimeframe.toLowerCase()})</div>
-                  <div className="text-sm font-medium text-expenseColor mt-0.5">₹{metrics.summaryExpenses.toLocaleString('en-IN')}</div>
+                  <div className="text-[10px] sm:text-[11px] text-secondaryText">Expenses</div>
+                  <div className="text-xs sm:text-sm font-medium text-expenseColor mt-0.5">₹{metrics.summaryExpenses.toLocaleString('en-IN')}</div>
                 </div>
               </div>
             </div>
           </section>
 
-          {/* Charts Section: Pie Chart Above Line Graph on Mobile via CSS Order */}
+          {/* Charts Section */}
           <section className="grid grid-cols-1 sm:grid-cols-2 gap-6 mb-12">
             
-            {/* 7-Day Trend Line Graph & Activity Cubes (Order 2 on mobile, Order 1 on sm+) */}
+            {/* 7-Day Trend Line Graph & Activity Cubes */}
             <div className="order-2 sm:order-1 bg-surface border border-borderMuted/60 p-4 rounded-lg flex flex-col justify-between min-h-[280px]">
               <div className="flex justify-between items-center mb-2">
                 <div className="text-xs font-medium text-secondaryText">7-Day Activity Trend</div>
@@ -949,12 +1001,10 @@
                 </button>
               </div>
 
-              {/* Line Chart */}
               <div className="relative w-full flex-1 flex items-center justify-center min-h-[130px] p-1 overflow-hidden">
                 <canvas ref={trendChartRef}></canvas>
               </div>
 
-              {/* Cubes Row with Clickable Day Action */}
               <div className="mt-3 pt-3 border-t border-borderMuted/40">
                 <div className="text-[10px] text-secondaryText mb-2 flex justify-between items-center">
                   <span>Daily Activity Intensity</span>
@@ -973,12 +1023,10 @@
                         }`}
                         title={`Click to load journal stream for ${d.fullDayLabel} (${d.dateStr})`}
                       >
-                        {/* Visual Activity Cube */}
                         <div 
                           className={`w-full h-8 sm:h-9 rounded-md border transition-all ${getCubeBg(d.spend, maxTrendSpend)} group-hover:scale-105`}
                         />
                         
-                        {/* Day Label & Explicit Amount */}
                         <div className="flex flex-col items-center leading-none mt-0.5 w-full">
                           <span className={`text-[10px] font-medium ${isSelected ? 'text-sage font-bold' : 'text-secondaryText/90'}`}>{d.dayLabel}</span>
                           <span className="text-[9px] font-semibold text-primaryText/90 mt-1 truncate w-full tracking-tighter">
@@ -992,7 +1040,7 @@
               </div>
             </div>
 
-            {/* Expense Breakdown Doughnut Chart (Order 1 on mobile, Order 2 on sm+) */}
+            {/* Expense Breakdown Doughnut Chart */}
             <div className="order-1 sm:order-2 bg-surface border border-borderMuted/60 p-4 rounded-lg flex flex-col justify-between min-h-[280px]">
               <div className="flex items-center justify-between mb-2">
                 <div className="text-xs font-medium text-secondaryText">Expense Breakdown</div>
@@ -1145,7 +1193,6 @@
               </div>
             )}
 
-            {/* Pagination Controls */}
             {filteredTransactions.length > visibleTxCount && (
               <div className="text-center mt-8 pt-4 border-t border-borderMuted/40">
                 <button
@@ -1195,7 +1242,7 @@
                         <button 
                           onClick={() => handleRemoveCategory(cat)}
                           className="text-expenseColor hover:text-rose-400 text-xs px-2 py-0.5 rounded border border-expenseColor/20 hover:border-expenseColor"
-                          title="Delete category"
+                          title="Delete category permanently"
                         >
                           Remove
                         </button>
@@ -1267,7 +1314,6 @@
           {showCalendarModal && (
             <div className="fixed inset-0 bg-appBg/80 backdrop-blur-xs flex items-center justify-center p-4 z-50">
               <div className="bg-surface border border-borderMuted p-5 rounded-lg w-full max-w-sm shadow-2xl">
-                {/* Header Navigation */}
                 <div className="flex justify-between items-center mb-4">
                   <button 
                     onClick={() => changeCalMonth(-1)}
@@ -1286,21 +1332,17 @@
                   </button>
                 </div>
 
-                {/* Days Header */}
                 <div className="grid grid-cols-7 gap-1 text-center mb-2">
                   {['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'].map(d => (
                     <span key={d} className="text-[10px] font-medium text-secondaryText/70">{d}</span>
                   ))}
                 </div>
 
-                {/* Days Grid */}
                 <div className="grid grid-cols-7 gap-1 text-center">
-                  {/* Blank slots before 1st of month */}
                   {Array.from({ length: firstDayOffset }).map((_, i) => (
                     <div key={`blank-${i}`} className="h-12"></div>
                   ))}
 
-                  {/* Day Cells */}
                   {Array.from({ length: daysInCalMonth }).map((_, i) => {
                     const day = i + 1;
                     const daySpend = getDailySpendForCal(day);
@@ -1338,7 +1380,7 @@
             </div>
           )}
 
-          {/* Balance Reveal / Privacy Change PIN Modal */}
+          {/* PIN Modal */}
           {showPinRevealModal && (
             <div className="fixed inset-0 bg-appBg/80 backdrop-blur-xs flex items-center justify-center p-4 z-50">
               <div className="bg-surface border border-borderMuted p-6 rounded-lg w-full max-w-xs shadow-2xl">
@@ -1383,7 +1425,7 @@
             </div>
           )}
 
-          {/* Floating Left Calendar Button */}
+          {/* Floating Action Buttons */}
           <button 
             onClick={() => setShowCalendarModal(true)}
             className="fixed bottom-6 left-6 w-12 h-12 rounded-full bg-surface border border-borderMuted text-primaryText font-medium text-lg flex items-center justify-center shadow-lg hover:bg-borderMuted/40 transition-all z-40"
@@ -1392,7 +1434,6 @@
             📅
           </button>
 
-          {/* Floating Right Entry Button */}
           <button 
             onClick={() => setShowComposer(!showComposer)}
             className="fixed bottom-6 right-6 w-12 h-12 rounded-full bg-sage text-appBg font-bold text-xl flex items-center justify-center shadow-lg hover:opacity-90 transition-all z-40"
