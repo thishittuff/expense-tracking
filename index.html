@@ -126,9 +126,12 @@
       const [liveNotification, setLiveNotification] = useState(null);
       const [filter, setFilter] = useState('ALL');
       const [selectedDateFilter, setSelectedDateFilter] = useState(null);
+      const [selectedDateRange, setSelectedDateRange] = useState(null);
+      const [selectedCategoryFilter, setSelectedCategoryFilter] = useState(null);
 
       const [chartTimeframe, setChartTimeframe] = useState('MONTH');
       const [summaryTimeframe, setSummaryTimeframe] = useState('WEEK');
+      const [trendMode, setTrendMode] = useState('DAYS'); // 'DAYS' or 'WEEKS'
       
       const [categories, setCategories] = useState([]);
       const [showCatModal, setShowCatModal] = useState(false);
@@ -136,6 +139,9 @@
 
       const [excludedTrendCategories, setExcludedTrendCategories] = useState([]);
       const [showTrendFilterModal, setShowTrendFilterModal] = useState(false);
+
+      const [excludedPieCategories, setExcludedPieCategories] = useState([]);
+      const [otherCategoriesList, setOtherCategoriesList] = useState([]);
 
       const [showCalendarModal, setShowCalendarModal] = useState(false);
       const [calViewDate, setCalViewDate] = useState(new Date());
@@ -207,7 +213,7 @@
 
       useEffect(() => {
         setVisibleTxCount(INITIAL_VISIBLE_COUNT);
-      }, [filter, selectedDateFilter]);
+      }, [filter, selectedDateFilter, selectedDateRange, selectedCategoryFilter]);
 
       const fetchCategories = async () => {
         if (!activeUser) return;
@@ -294,6 +300,7 @@
 
         setCategories(prev => prev.filter(c => c !== catToRemove));
         updateExcludedTrendCategories(prev => prev.filter(c => c !== catToRemove));
+        setExcludedPieCategories(prev => prev.filter(c => c !== catToRemove));
         fetchData();
       };
 
@@ -474,6 +481,7 @@
       };
 
       const loadJournalForDate = (dateStr) => {
+        setSelectedDateRange(null);
         setSelectedDateFilter(dateStr);
         setTimeout(() => {
           const el = document.getElementById('journal-stream');
@@ -516,6 +524,7 @@
         return () => { supabase.removeChannel(channel); };
       }, [activeUser]);
 
+      /* Doughnut / Pie Chart rendering logic */
       useEffect(() => {
         if (!chartRef.current || !activeUser) return;
 
@@ -528,13 +537,16 @@
           if (chartTimeframe === 'WEEK') {
             const cutoff = new Date(now);
             cutoff.setDate(now.getDate() - 7);
-            return tDate >= cutoff;
-          }
-          if (chartTimeframe === 'MONTH') {
+            if (tDate < cutoff) return false;
+          } else if (chartTimeframe === 'MONTH') {
             const cutoff = new Date(now);
             cutoff.setDate(now.getDate() - 30);
-            return tDate >= cutoff;
+            if (tDate < cutoff) return false;
           }
+
+          const cat = t.category || 'General';
+          if (excludedPieCategories.includes(cat)) return false;
+
           return true;
         });
 
@@ -550,14 +562,18 @@
 
         const finalCategoryTotals = {};
         let otherTotal = 0;
+        const oCats = [];
 
         Object.entries(categoryTotals).forEach(([cat, amt]) => {
           if (totalExpenseSum > 0 && (amt / totalExpenseSum) < 0.02 && Object.keys(categoryTotals).length > 2) {
             otherTotal += amt;
+            oCats.push(cat);
           } else {
             finalCategoryTotals[cat] = amt;
           }
         });
+
+        setOtherCategoriesList(oCats);
 
         if (otherTotal > 0) {
           finalCategoryTotals["Other (<2%)"] = otherTotal;
@@ -584,9 +600,36 @@
           options: {
             responsive: true,
             maintainAspectRatio: false,
+            onHover: (event, chartElement) => {
+              if (event.native) {
+                event.native.target.style.cursor = chartElement[0] ? 'pointer' : 'default';
+              }
+            },
+            onClick: (evt, activeElements) => {
+              if (activeElements && activeElements.length > 0) {
+                const index = activeElements[0].index;
+                const clickedCat = labels[index];
+                if (clickedCat && clickedCat !== 'No Data') {
+                  setSelectedCategoryFilter(clickedCat);
+                  setTimeout(() => {
+                    const el = document.getElementById('journal-stream');
+                    if (el) el.scrollIntoView({ behavior: 'smooth' });
+                  }, 100);
+                }
+              }
+            },
             plugins: {
               legend: { 
                 position: 'bottom', 
+                onClick: (e, legendItem) => {
+                  const clickedCat = legendItem.text;
+                  if (clickedCat === 'Other (<2%)' || clickedCat === 'No Data') return;
+                  setExcludedPieCategories(prev => 
+                    prev.includes(clickedCat) 
+                      ? prev.filter(c => c !== clickedCat) 
+                      : [...prev, clickedCat]
+                  );
+                },
                 labels: { 
                   color: '#E2E8F0',
                   font: { size: 9, weight: '500' }, 
@@ -599,8 +642,9 @@
             cutout: '68%'
           }
         });
-      }, [transactions, activeUser, chartTimeframe]);
+      }, [transactions, activeUser, chartTimeframe, excludedPieCategories]);
 
+      /* Trend Line Chart (7 Days vs 7 Weeks) rendering logic */
       useEffect(() => {
         if (!trendChartRef.current || !activeUser) return;
 
@@ -609,34 +653,74 @@
         const dayDetails = [];
         const today = new Date();
 
-        for (let i = 6; i >= 0; i--) {
-          const d = new Date();
-          d.setDate(today.getDate() - i);
-          const dateStr = d.toDateString();
-          const dayLabel = d.toLocaleDateString('en-US', { weekday: 'narrow' });
-          const fullDayLabel = d.toLocaleDateString('en-US', { weekday: 'short' });
-          
-          const daySpend = transactions
-            .filter(t => {
-              if (t.type !== 'EXPENSE') return false;
-              if (new Date(t.created_at).toDateString() !== dateStr) return false;
-              
-              const cat = t.category || 'General';
-              if (excludedTrendCategories.includes(cat)) {
-                return false;
-              }
-              return true;
-            })
-            .reduce((sum, t) => sum + Number(t.amount || 0), 0);
+        if (trendMode === 'DAYS') {
+          for (let i = 6; i >= 0; i--) {
+            const d = new Date();
+            d.setDate(today.getDate() - i);
+            const dateStr = d.toDateString();
+            const dayLabel = d.toLocaleDateString('en-US', { weekday: 'narrow' });
+            const fullDayLabel = d.toLocaleDateString('en-US', { weekday: 'short' });
+            
+            const daySpend = transactions
+              .filter(t => {
+                if (t.type !== 'EXPENSE') return false;
+                if (new Date(t.created_at).toDateString() !== dateStr) return false;
+                
+                const cat = t.category || 'General';
+                if (excludedTrendCategories.includes(cat)) {
+                  return false;
+                }
+                return true;
+              })
+              .reduce((sum, t) => sum + Number(t.amount || 0), 0);
 
-          days.push(dayLabel);
-          amounts.push(daySpend);
-          dayDetails.push({
-            dayLabel,
-            fullDayLabel,
-            dateStr,
-            spend: daySpend
-          });
+            days.push(dayLabel);
+            amounts.push(daySpend);
+            dayDetails.push({
+              dayLabel,
+              fullDayLabel,
+              dateStr,
+              spend: daySpend
+            });
+          }
+        } else {
+          // 7-Week Mode
+          for (let i = 6; i >= 0; i--) {
+            const endDate = new Date(today);
+            endDate.setDate(today.getDate() - (i * 7));
+            endDate.setHours(23, 59, 59, 999);
+
+            const startDate = new Date(today);
+            startDate.setDate(today.getDate() - (i * 7 + 6));
+            startDate.setHours(0, 0, 0, 0);
+
+            const weekLabel = `W${7 - i}`;
+            const startFmt = startDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+            const endFmt = endDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+            const fullLabel = `${startFmt} - ${endFmt}`;
+
+            const weekSpend = transactions
+              .filter(t => {
+                if (t.type !== 'EXPENSE') return false;
+                const tDate = new Date(t.created_at);
+                if (tDate < startDate || tDate > endDate) return false;
+
+                const cat = t.category || 'General';
+                if (excludedTrendCategories.includes(cat)) return false;
+                return true;
+              })
+              .reduce((sum, t) => sum + Number(t.amount || 0), 0);
+
+            days.push(weekLabel);
+            amounts.push(weekSpend);
+            dayDetails.push({
+              dayLabel: weekLabel,
+              fullDayLabel: fullLabel,
+              startDateStr: startDate.toDateString(),
+              endDateStr: endDate.toDateString(),
+              spend: weekSpend
+            });
+          }
         }
 
         setTrendDaysData(dayDetails);
@@ -653,7 +737,7 @@
           data: {
             labels: days,
             datasets: [{
-              label: 'Daily Spend',
+              label: trendMode === 'DAYS' ? 'Daily Spend' : 'Weekly Spend',
               data: amounts,
               borderColor: '#F43F5E',
               borderWidth: 2,
@@ -679,6 +763,11 @@
                 titleColor: '#9CA3AF',
                 bodyColor: '#F5F5F4',
                 callbacks: {
+                  title: (items) => {
+                    if (!items.length) return '';
+                    const idx = items[0].dataIndex;
+                    return dayDetails[idx]?.fullDayLabel || items[0].label;
+                  },
                   label: (ctx) => ` Spent: ₹${ctx.parsed.y.toLocaleString('en-IN')}`
                 }
               }
@@ -700,7 +789,7 @@
             }
           }
         });
-      }, [transactions, activeUser, excludedTrendCategories]);
+      }, [transactions, activeUser, excludedTrendCategories, trendMode]);
 
       const groupTransactionsByDate = (txs) => {
         const groups = {};
@@ -756,6 +845,23 @@
         if (window.confirm(`Load Journal stream for ${formatted}?`)) {
           setShowCalendarModal(false);
           loadJournalForDate(dateStr);
+        }
+      };
+
+      const handleTrendCubeClick = (d) => {
+        if (d.dateStr) {
+          loadJournalForDate(d.dateStr);
+        } else if (d.startDateStr && d.endDateStr) {
+          setSelectedDateFilter(null);
+          setSelectedDateRange({
+            start: d.startDateStr,
+            end: d.endDateStr,
+            label: d.fullDayLabel
+          });
+          setTimeout(() => {
+            const el = document.getElementById('journal-stream');
+            if (el) el.scrollIntoView({ behavior: 'smooth' });
+          }, 100);
         }
       };
 
@@ -828,10 +934,28 @@
       const filteredTransactions = transactions.filter(t => {
         if (filter === 'EXPENSES' && t.type !== 'EXPENSE') return false;
         if (filter === 'DEPOSITS' && t.type !== 'DEPOSIT') return false;
+        
         if (selectedDateFilter) {
           const tDateStr = new Date(t.created_at).toDateString();
           if (tDateStr !== selectedDateFilter) return false;
         }
+
+        if (selectedDateRange) {
+          const tDate = new Date(t.created_at);
+          const s = new Date(selectedDateRange.start); s.setHours(0,0,0,0);
+          const e = new Date(selectedDateRange.end); e.setHours(23,59,59,999);
+          if (tDate < s || tDate > e) return false;
+        }
+
+        if (selectedCategoryFilter) {
+          const cat = t.category || 'General';
+          if (selectedCategoryFilter === 'Other (<2%)') {
+            if (!otherCategoriesList.includes(cat)) return false;
+          } else if (cat !== selectedCategoryFilter) {
+            return false;
+          }
+        }
+
         return true;
       });
 
@@ -850,9 +974,8 @@
             </div>
           )}
 
-          {/* Refactored Responsive Header */}
+          {/* Top Bar Navigation Header */}
           <header className="mb-8">
-            {/* Top Bar Navigation Actions */}
             <div className="flex items-center justify-between mb-4 pb-3 border-b border-borderMuted/40">
               <div className="flex items-center gap-2">
                 <span className="w-2 h-2 rounded-full bg-sage animate-pulse"></span>
@@ -880,7 +1003,6 @@
               </div>
             </div>
 
-            {/* Greeting & Quick Insights */}
             <div>
               <h1 className="text-lg sm:text-xl font-semibold text-primaryText tracking-tight">
                 {getGreeting()}, <span className="text-sage">{activeUser.name}</span>
@@ -895,7 +1017,7 @@
             </div>
           </header>
 
-          {/* Refactored Balance Card */}
+          {/* Balance Card */}
           <section className="mb-10 bg-surface/40 border border-borderMuted/60 p-4 sm:p-5 rounded-2xl">
             <div className="flex items-center justify-between mb-2">
               <span className="text-[11px] font-semibold text-secondaryText uppercase tracking-wider">Available Balance</span>
@@ -939,7 +1061,6 @@
               )}
             </div>
 
-            {/* Income & Expenses Quick Stats */}
             <div className="mt-4 pt-4 border-t border-borderMuted/60">
               <div className="flex items-center justify-between mb-3">
                 <span className="text-[11px] font-medium text-secondaryText uppercase tracking-wider">Financial Overview</span>
@@ -978,10 +1099,26 @@
           {/* Charts Section */}
           <section className="grid grid-cols-1 sm:grid-cols-2 gap-6 mb-12">
             
-            {/* 7-Day Trend Line Graph & Activity Cubes */}
+            {/* 7-Day / 7-Week Activity Trend Line Graph */}
             <div className="order-2 sm:order-1 bg-surface border border-borderMuted/60 p-4 rounded-lg flex flex-col justify-between min-h-[280px]">
-              <div className="flex justify-between items-center mb-2">
-                <div className="text-xs font-medium text-secondaryText">7-Day Activity Trend</div>
+              <div className="flex justify-between items-center mb-2 flex-wrap gap-1">
+                <div className="flex items-center gap-1.5">
+                  <div className="text-xs font-medium text-secondaryText">Activity Trend</div>
+                  <div className="flex gap-0.5 bg-appBg p-0.5 rounded border border-borderMuted text-[9px]">
+                    <button
+                      onClick={() => setTrendMode('DAYS')}
+                      className={`px-1.5 py-0.5 rounded transition-colors ${trendMode === 'DAYS' ? 'bg-surface text-primaryText font-medium' : 'text-secondaryText hover:text-primaryText'}`}
+                    >
+                      7 Days
+                    </button>
+                    <button
+                      onClick={() => setTrendMode('WEEKS')}
+                      className={`px-1.5 py-0.5 rounded transition-colors ${trendMode === 'WEEKS' ? 'bg-surface text-primaryText font-medium' : 'text-secondaryText hover:text-primaryText'}`}
+                    >
+                      7 Weeks
+                    </button>
+                  </div>
+                </div>
                 
                 <button
                   onClick={() => setShowTrendFilterModal(true)}
@@ -992,7 +1129,7 @@
                   }`}
                   title="Filter categories from line chart"
                 >
-                  <span>🏷️ Filter Chart</span>
+                  <span>🏷️ Filter</span>
                   {excludedTrendCategories.length > 0 && (
                     <span className="bg-expenseColor text-appBg font-bold text-[9px] px-1 rounded-full">
                       {excludedTrendCategories.length}
@@ -1007,21 +1144,21 @@
 
               <div className="mt-3 pt-3 border-t border-borderMuted/40">
                 <div className="text-[10px] text-secondaryText mb-2 flex justify-between items-center">
-                  <span>Daily Activity Intensity</span>
-                  <span className="text-[9px] text-sage/80 font-medium">Click square to load day</span>
+                  <span>Activity Intensity</span>
+                  <span className="text-[9px] text-sage/80 font-medium">Click square to load stream</span>
                 </div>
 
                 <div className="grid grid-cols-7 gap-1.5 text-center">
                   {trendDaysData.map((d, idx) => {
-                    const isSelected = selectedDateFilter === d.dateStr;
+                    const isSelected = selectedDateFilter === d.dateStr || (selectedDateRange && selectedDateRange.label === d.fullDayLabel);
                     return (
                       <button 
                         key={idx} 
-                        onClick={() => loadJournalForDate(d.dateStr)}
+                        onClick={() => handleTrendCubeClick(d)}
                         className={`flex flex-col items-center gap-1 group relative cursor-pointer p-1 rounded-md transition-all ${
                           isSelected ? 'ring-2 ring-sage bg-sage/10' : 'hover:bg-appBg/60'
                         }`}
-                        title={`Click to load journal stream for ${d.fullDayLabel} (${d.dateStr})`}
+                        title={`Click to load journal stream for ${d.fullDayLabel}`}
                       >
                         <div 
                           className={`w-full h-8 sm:h-9 rounded-md border transition-all ${getCubeBg(d.spend, maxTrendSpend)} group-hover:scale-105`}
@@ -1043,7 +1180,18 @@
             {/* Expense Breakdown Doughnut Chart */}
             <div className="order-1 sm:order-2 bg-surface border border-borderMuted/60 p-4 rounded-lg flex flex-col justify-between min-h-[280px]">
               <div className="flex items-center justify-between mb-2">
-                <div className="text-xs font-medium text-secondaryText">Expense Breakdown</div>
+                <div className="flex items-center gap-1.5">
+                  <div className="text-xs font-medium text-secondaryText">Expense Breakdown</div>
+                  {excludedPieCategories.length > 0 && (
+                    <button
+                      onClick={() => setExcludedPieCategories([])}
+                      className="text-[9px] bg-expenseColor/20 text-expenseColor border border-expenseColor/40 px-1.5 py-0.5 rounded font-medium hover:bg-expenseColor/30"
+                      title="Reset pie chart filters"
+                    >
+                      Reset ({excludedPieCategories.length})
+                    </button>
+                  )}
+                </div>
                 
                 <div className="flex gap-1 bg-appBg/60 p-0.5 rounded border border-borderMuted/80 text-[10px]">
                   <button
@@ -1070,6 +1218,10 @@
               <div className="relative w-full flex-1 flex items-center justify-center min-h-[160px] p-1 overflow-hidden">
                 <canvas ref={chartRef}></canvas>
               </div>
+
+              <div className="mt-2 text-center">
+                <span className="text-[9px] text-secondaryText/70">Click arc to filter stream • Click legend to hide arc</span>
+              </div>
             </div>
 
           </section>
@@ -1077,8 +1229,9 @@
           {/* Timeline Feed */}
           <section id="journal-stream">
             <div className="flex items-center justify-between mb-6 flex-wrap gap-2">
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <h2 className="text-xs font-medium text-secondaryText uppercase tracking-wider">Journal Stream</h2>
+                
                 {selectedDateFilter && (
                   <div className="flex items-center gap-1.5 bg-sage/10 border border-sage/30 text-sage text-[10px] px-2 py-0.5 rounded-full font-medium">
                     <span>📅 {new Date(selectedDateFilter).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}</span>
@@ -1086,6 +1239,32 @@
                       onClick={() => setSelectedDateFilter(null)}
                       className="hover:text-primaryText font-bold ml-1"
                       title="Clear date filter"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                )}
+
+                {selectedDateRange && (
+                  <div className="flex items-center gap-1.5 bg-sage/10 border border-sage/30 text-sage text-[10px] px-2 py-0.5 rounded-full font-medium">
+                    <span>📅 {selectedDateRange.label}</span>
+                    <button 
+                      onClick={() => setSelectedDateRange(null)}
+                      className="hover:text-primaryText font-bold ml-1"
+                      title="Clear date range filter"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                )}
+
+                {selectedCategoryFilter && (
+                  <div className="flex items-center gap-1.5 bg-sage/10 border border-sage/30 text-sage text-[10px] px-2 py-0.5 rounded-full font-medium">
+                    <span>🏷️ {selectedCategoryFilter}</span>
+                    <button 
+                      onClick={() => setSelectedCategoryFilter(null)}
+                      className="hover:text-primaryText font-bold ml-1"
+                      title="Clear category filter"
                     >
                       ✕
                     </button>
@@ -1110,14 +1289,14 @@
 
             {Object.keys(groupedTransactions).length === 0 ? (
               <div className="text-center py-12 text-secondaryText text-xs bg-surface/20 rounded-lg border border-borderMuted/40">
-                No entries recorded {selectedDateFilter ? 'for this date' : ''}.
-                {selectedDateFilter && (
+                No entries recorded matching the current filters.
+                {(selectedDateFilter || selectedDateRange || selectedCategoryFilter) && (
                   <div className="mt-2">
                     <button 
-                      onClick={() => setSelectedDateFilter(null)} 
-                      className="text-sage hover:underline text-xs"
+                      onClick={() => { setSelectedDateFilter(null); setSelectedDateRange(null); setSelectedCategoryFilter(null); }} 
+                      className="text-sage hover:underline text-xs font-medium"
                     >
-                      Show all entries
+                      Clear all filters
                     </button>
                   </div>
                 )}
@@ -1264,7 +1443,7 @@
                   <h3 className="text-sm font-medium text-primaryText">Filter Line Chart</h3>
                   <button onClick={() => setShowTrendFilterModal(false)} className="text-secondaryText hover:text-primaryText text-xs">✕</button>
                 </div>
-                <p className="text-[11px] text-secondaryText mb-4">Uncheck categories to exclude them from the 7-day trend chart.</p>
+                <p className="text-[11px] text-secondaryText mb-4">Uncheck categories to exclude them from the trend chart.</p>
 
                 <div className="flex justify-between items-center text-xs text-sage mb-3">
                   <button onClick={() => updateExcludedTrendCategories([])} className="hover:underline">Select All</button>
