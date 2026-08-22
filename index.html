@@ -192,8 +192,10 @@
         if (activeUser) {
           const savedSetting = localStorage.getItem(`journal_hide_balance_${activeUser.user_id}`);
           const isHidden = savedSetting !== null ? savedSetting === 'true' : true;
+          const isSessionRevealed = sessionStorage.getItem(`journal_balance_revealed_${activeUser.user_id}`) === 'true';
+
           setHideBalanceSetting(isHidden);
-          setIsBalanceRevealed(!isHidden);
+          setIsBalanceRevealed(!isHidden || isSessionRevealed);
 
           const savedTrendExclusions = localStorage.getItem(`journal_excluded_trend_cats_${activeUser.user_id}`);
           if (savedTrendExclusions) {
@@ -323,6 +325,9 @@
       };
 
       const handleLogout = () => {
+        if (activeUser) {
+          sessionStorage.removeItem(`journal_balance_revealed_${activeUser.user_id}`);
+        }
         localStorage.removeItem('journal_logged_user_id');
         setActiveUser(null);
         setSelectedLoginUser(null);
@@ -340,6 +345,7 @@
           setIsBalanceRevealed(false);
           if (activeUser) {
             localStorage.setItem(`journal_hide_balance_${activeUser.user_id}`, 'true');
+            sessionStorage.removeItem(`journal_balance_revealed_${activeUser.user_id}`);
           }
         }
       };
@@ -355,6 +361,10 @@
         const userPin = activeUser.pin ? String(activeUser.pin) : '1234';
         if (String(revealPin).trim() === userPin.trim()) {
           setIsBalanceRevealed(true);
+          if (activeUser) {
+            sessionStorage.setItem(`journal_balance_revealed_${activeUser.user_id}`, 'true');
+          }
+
           if (pendingPrivacyAction === 'TURN_OFF_SETTING') {
             setHideBalanceSetting(false);
             if (activeUser) {
@@ -492,11 +502,20 @@
       useEffect(() => {
         if (!activeUser) return;
 
+        const matchesUser = (payload) => {
+          if (!payload) return false;
+          const newUid = payload.new?.user_id;
+          const oldUid = payload.old?.user_id;
+          if (newUid !== undefined && newUid !== null) return String(newUid) === String(activeUser.user_id);
+          if (oldUid !== undefined && oldUid !== null) return String(oldUid) === String(activeUser.user_id);
+          return true;
+        };
+
         const channel = supabase
           .channel(`realtime_user_${activeUser.user_id}`)
           .on('postgres_changes', { event: '*', schema: 'public', table: 'expenses' }, (payload) => {
-            if (payload.new?.user_id === activeUser.user_id || payload.old?.user_id === activeUser.user_id) {
-              if (payload.eventType === 'INSERT') {
+            if (matchesUser(payload)) {
+              if (payload.eventType === 'INSERT' && payload.new) {
                 if (navigator.vibrate) navigator.vibrate([80, 40]);
                 setLiveNotification(`+ ₹${payload.new.amount} (${payload.new.note || 'Expense'})`);
                 setTimeout(() => setLiveNotification(null), 4000);
@@ -505,8 +524,8 @@
             }
           })
           .on('postgres_changes', { event: '*', schema: 'public', table: 'deposits' }, (payload) => {
-            if (payload.new?.user_id === activeUser.user_id || payload.old?.user_id === activeUser.user_id) {
-              if (payload.eventType === 'INSERT') {
+            if (matchesUser(payload)) {
+              if (payload.eventType === 'INSERT' && payload.new) {
                 if (navigator.vibrate) navigator.vibrate([80, 40]);
                 setLiveNotification(`+ ₹${payload.new.amount} (${payload.new.note || 'Deposit'})`);
                 setTimeout(() => setLiveNotification(null), 4000);
@@ -515,7 +534,7 @@
             }
           })
           .on('postgres_changes', { event: '*', schema: 'public', table: 'categories' }, (payload) => {
-            if (payload.new?.user_id === activeUser.user_id || payload.old?.user_id === activeUser.user_id) {
+            if (matchesUser(payload)) {
               fetchCategories();
             }
           })
@@ -1051,7 +1070,12 @@
                   </div>
                   {hideBalanceSetting && isBalanceRevealed && (
                     <button 
-                      onClick={() => setIsBalanceRevealed(false)}
+                      onClick={() => {
+                        setIsBalanceRevealed(false);
+                        if (activeUser) {
+                          sessionStorage.removeItem(`journal_balance_revealed_${activeUser.user_id}`);
+                        }
+                      }}
                       className="text-[11px] text-secondaryText hover:text-sage border border-borderMuted bg-appBg/60 px-2.5 py-1 rounded-lg transition-colors"
                     >
                       Hide Again
