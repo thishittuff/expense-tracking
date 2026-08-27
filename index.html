@@ -112,6 +112,22 @@
       return `₹${amt}`;
     };
 
+    const getStartOfWeek = (d = new Date()) => {
+      const date = new Date(d);
+      const day = date.getDay();
+      const diff = date.getDate() - day + (day === 0 ? -6 : 1);
+      date.setDate(diff);
+      date.setHours(0, 0, 0, 0);
+      return date;
+    };
+
+    const getStartOfMonth = (d = new Date()) => {
+      const date = new Date(d);
+      date.setDate(1);
+      date.setHours(0, 0, 0, 0);
+      return date;
+    };
+
     const INITIAL_VISIBLE_COUNT = 20;
 
     function App() {
@@ -131,7 +147,7 @@
 
       const [chartTimeframe, setChartTimeframe] = useState('MONTH');
       const [summaryTimeframe, setSummaryTimeframe] = useState('WEEK');
-      const [trendMode, setTrendMode] = useState('DAYS'); // 'DAYS' or 'WEEKS'
+      const [trendMode, setTrendMode] = useState('DAYS');
       
       const [categories, setCategories] = useState([]);
       const [showCatModal, setShowCatModal] = useState(false);
@@ -410,6 +426,9 @@
         let summaryExp = 0;
         let summaryDep = 0;
 
+        const startOfWeek = getStartOfWeek(now);
+        const startOfMonth = getStartOfMonth(now);
+
         transactions.forEach(item => {
           const tDate = new Date(item.created_at);
           const amt = Number(item.amount) || 0;
@@ -424,13 +443,9 @@
 
           let includeInSummary = true;
           if (summaryTimeframe === 'WEEK') {
-            const cutoff = new Date(now);
-            cutoff.setDate(now.getDate() - 7);
-            includeInSummary = tDate >= cutoff;
+            includeInSummary = tDate >= startOfWeek && tDate <= now;
           } else if (summaryTimeframe === 'MONTH') {
-            const cutoff = new Date(now);
-            cutoff.setDate(now.getDate() - 30);
-            includeInSummary = tDate >= cutoff;
+            includeInSummary = tDate >= startOfMonth && tDate <= now;
           }
 
           if (includeInSummary) {
@@ -493,10 +508,6 @@
       const loadJournalForDate = (dateStr) => {
         setSelectedDateRange(null);
         setSelectedDateFilter(dateStr);
-        setTimeout(() => {
-          const el = document.getElementById('journal-stream');
-          if (el) el.scrollIntoView({ behavior: 'smooth' });
-        }, 100);
       };
 
       useEffect(() => {
@@ -548,19 +559,23 @@
         if (!chartRef.current || !activeUser) return;
 
         const now = new Date();
+        const startOfWeek = getStartOfWeek(now);
+        const startOfMonth = getStartOfMonth(now);
 
         const filteredExpenses = transactions.filter(t => {
           if (t.type !== 'EXPENSE') return false;
           const tDate = new Date(t.created_at);
 
-          if (chartTimeframe === 'WEEK') {
-            const cutoff = new Date(now);
-            cutoff.setDate(now.getDate() - 7);
-            if (tDate < cutoff) return false;
+          if (selectedDateRange) {
+            const s = new Date(selectedDateRange.start);
+            const e = new Date(selectedDateRange.end);
+            if (tDate < s || tDate > e) return false;
+          } else if (selectedDateFilter) {
+            if (tDate.toDateString() !== selectedDateFilter) return false;
+          } else if (chartTimeframe === 'WEEK') {
+            if (tDate < startOfWeek || tDate > now) return false;
           } else if (chartTimeframe === 'MONTH') {
-            const cutoff = new Date(now);
-            cutoff.setDate(now.getDate() - 30);
-            if (tDate < cutoff) return false;
+            if (tDate < startOfMonth || tDate > now) return false;
           }
 
           const cat = t.category || 'General';
@@ -630,10 +645,6 @@
                 const clickedCat = labels[index];
                 if (clickedCat && clickedCat !== 'No Data') {
                   setSelectedCategoryFilter(clickedCat);
-                  setTimeout(() => {
-                    const el = document.getElementById('journal-stream');
-                    if (el) el.scrollIntoView({ behavior: 'smooth' });
-                  }, 100);
                 }
               }
             },
@@ -661,7 +672,7 @@
             cutout: '68%'
           }
         });
-      }, [transactions, activeUser, chartTimeframe, excludedPieCategories]);
+      }, [transactions, activeUser, chartTimeframe, excludedPieCategories, selectedDateFilter, selectedDateRange]);
 
       /* Trend Line Chart (7 Days vs 7 Weeks) rendering logic */
       useEffect(() => {
@@ -703,26 +714,31 @@
             });
           }
         } else {
-          // 7-Week Mode
+          const currentMon = getStartOfWeek(today);
+
           for (let i = 6; i >= 0; i--) {
-            const endDate = new Date(today);
-            endDate.setDate(today.getDate() - (i * 7));
-            endDate.setHours(23, 59, 59, 999);
+            const weekStart = new Date(currentMon);
+            weekStart.setDate(currentMon.getDate() - (i * 7));
+            weekStart.setHours(0, 0, 0, 0);
 
-            const startDate = new Date(today);
-            startDate.setDate(today.getDate() - (i * 7 + 6));
-            startDate.setHours(0, 0, 0, 0);
+            const weekEnd = new Date(weekStart);
+            if (i === 0) {
+              weekEnd.setTime(today.getTime());
+            } else {
+              weekEnd.setDate(weekStart.getDate() + 6);
+              weekEnd.setHours(23, 59, 59, 999);
+            }
 
-            const weekLabel = `W${7 - i}`;
-            const startFmt = startDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-            const endFmt = endDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+            const weekLabel = i === 0 ? 'This Wk' : `W${7 - i}`;
+            const startFmt = weekStart.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+            const endFmt = (i === 0 ? today : weekEnd).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
             const fullLabel = `${startFmt} - ${endFmt}`;
 
             const weekSpend = transactions
               .filter(t => {
                 if (t.type !== 'EXPENSE') return false;
                 const tDate = new Date(t.created_at);
-                if (tDate < startDate || tDate > endDate) return false;
+                if (tDate < weekStart || tDate > weekEnd) return false;
 
                 const cat = t.category || 'General';
                 if (excludedTrendCategories.includes(cat)) return false;
@@ -735,8 +751,8 @@
             dayDetails.push({
               dayLabel: weekLabel,
               fullDayLabel: fullLabel,
-              startDateStr: startDate.toDateString(),
-              endDateStr: endDate.toDateString(),
+              startDateStr: weekStart.toISOString(),
+              endDateStr: weekEnd.toISOString(),
               spend: weekSpend
             });
           }
@@ -763,8 +779,8 @@
               pointBackgroundColor: '#F43F5E',
               pointBorderColor: '#171A1F',
               pointBorderWidth: 1.5,
-              pointRadius: 3,
-              pointHoverRadius: 5,
+              pointRadius: 4,
+              pointHoverRadius: 6,
               tension: 0.35,
               fill: true,
               backgroundColor: gradient
@@ -773,6 +789,20 @@
           options: {
             responsive: true,
             maintainAspectRatio: false,
+            onHover: (event, chartElement) => {
+              if (event.native) {
+                event.native.target.style.cursor = chartElement[0] ? 'pointer' : 'default';
+              }
+            },
+            onClick: (evt, activeElements) => {
+              if (activeElements && activeElements.length > 0) {
+                const index = activeElements[0].index;
+                const selectedData = dayDetails[index];
+                if (selectedData) {
+                  handleTrendCubeClick(selectedData);
+                }
+              }
+            },
             plugins: {
               legend: { display: false },
               tooltip: {
@@ -869,7 +899,8 @@
 
       const handleTrendCubeClick = (d) => {
         if (d.dateStr) {
-          loadJournalForDate(d.dateStr);
+          setSelectedDateRange(null);
+          setSelectedDateFilter(d.dateStr);
         } else if (d.startDateStr && d.endDateStr) {
           setSelectedDateFilter(null);
           setSelectedDateRange({
@@ -877,10 +908,6 @@
             end: d.endDateStr,
             label: d.fullDayLabel
           });
-          setTimeout(() => {
-            const el = document.getElementById('journal-stream');
-            if (el) el.scrollIntoView({ behavior: 'smooth' });
-          }, 100);
         }
       };
 
@@ -961,8 +988,8 @@
 
         if (selectedDateRange) {
           const tDate = new Date(t.created_at);
-          const s = new Date(selectedDateRange.start); s.setHours(0,0,0,0);
-          const e = new Date(selectedDateRange.end); e.setHours(23,59,59,999);
+          const s = new Date(selectedDateRange.start);
+          const e = new Date(selectedDateRange.end);
           if (tDate < s || tDate > e) return false;
         }
 
@@ -1097,7 +1124,7 @@
                         summaryTimeframe === tf ? 'bg-surface text-primaryText font-medium shadow-xs' : 'text-secondaryText hover:text-primaryText'
                       }`}
                     >
-                      {tf === 'WEEK' ? 'Week' : tf === 'MONTH' ? 'Month' : 'All'}
+                      {tf === 'WEEK' ? 'Week (Mon-Today)' : tf === 'MONTH' ? 'Month (1st-Today)' : 'All'}
                     </button>
                   ))}
                 </div>
@@ -1123,7 +1150,7 @@
           {/* Charts Section */}
           <section className="grid grid-cols-1 sm:grid-cols-2 gap-6 mb-12">
             
-            {/* 7-Day / 7-Week Activity Trend Line Graph */}
+            {/* Activity Trend Line Graph (7 Days / 7 Calendar Weeks) */}
             <div className="order-2 sm:order-1 bg-surface border border-borderMuted/60 p-4 rounded-lg flex flex-col justify-between min-h-[280px]">
               <div className="flex justify-between items-center mb-2 flex-wrap gap-1">
                 <div className="flex items-center gap-1.5">
@@ -1169,7 +1196,7 @@
               <div className="mt-3 pt-3 border-t border-borderMuted/40">
                 <div className="text-[10px] text-secondaryText mb-2 flex justify-between items-center">
                   <span>Activity Intensity</span>
-                  <span className="text-[9px] text-sage/80 font-medium">Click square to load stream</span>
+                  <span className="text-[9px] text-sage/80 font-medium">Click period to update Pie & Stream</span>
                 </div>
 
                 <div className="grid grid-cols-7 gap-1.5 text-center">
@@ -1182,7 +1209,7 @@
                         className={`flex flex-col items-center gap-1 group relative cursor-pointer p-1 rounded-md transition-all ${
                           isSelected ? 'ring-2 ring-sage bg-sage/10' : 'hover:bg-appBg/60'
                         }`}
-                        title={`Click to load journal stream for ${d.fullDayLabel}`}
+                        title={`Click to filter breakdown & stream for ${d.fullDayLabel}`}
                       >
                         <div 
                           className={`w-full h-8 sm:h-9 rounded-md border transition-all ${getCubeBg(d.spend, maxTrendSpend)} group-hover:scale-105`}
@@ -1203,9 +1230,11 @@
 
             {/* Expense Breakdown Doughnut Chart */}
             <div className="order-1 sm:order-2 bg-surface border border-borderMuted/60 p-4 rounded-lg flex flex-col justify-between min-h-[280px]">
-              <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center justify-between mb-2 flex-wrap gap-1">
                 <div className="flex items-center gap-1.5">
-                  <div className="text-xs font-medium text-secondaryText">Expense Breakdown</div>
+                  <div className="text-xs font-medium text-secondaryText">
+                    Expense Breakdown {selectedDateRange ? `(${selectedDateRange.label})` : selectedDateFilter ? `(${new Date(selectedDateFilter).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })})` : ''}
+                  </div>
                   {excludedPieCategories.length > 0 && (
                     <button
                       onClick={() => setExcludedPieCategories([])}
@@ -1219,20 +1248,20 @@
                 
                 <div className="flex gap-1 bg-appBg/60 p-0.5 rounded border border-borderMuted/80 text-[10px]">
                   <button
-                    onClick={() => setChartTimeframe('WEEK')}
-                    className={`px-1.5 py-0.5 rounded ${chartTimeframe === 'WEEK' ? 'bg-surface text-primaryText font-medium' : 'text-secondaryText hover:text-primaryText'}`}
+                    onClick={() => { setSelectedDateRange(null); setSelectedDateFilter(null); setChartTimeframe('WEEK'); }}
+                    className={`px-1.5 py-0.5 rounded ${chartTimeframe === 'WEEK' && !selectedDateRange && !selectedDateFilter ? 'bg-surface text-primaryText font-medium' : 'text-secondaryText hover:text-primaryText'}`}
                   >
                     Week
                   </button>
                   <button
-                    onClick={() => setChartTimeframe('MONTH')}
-                    className={`px-1.5 py-0.5 rounded ${chartTimeframe === 'MONTH' ? 'bg-surface text-primaryText font-medium' : 'text-secondaryText hover:text-primaryText'}`}
+                    onClick={() => { setSelectedDateRange(null); setSelectedDateFilter(null); setChartTimeframe('MONTH'); }}
+                    className={`px-1.5 py-0.5 rounded ${chartTimeframe === 'MONTH' && !selectedDateRange && !selectedDateFilter ? 'bg-surface text-primaryText font-medium' : 'text-secondaryText hover:text-primaryText'}`}
                   >
                     Month
                   </button>
                   <button
-                    onClick={() => setChartTimeframe('ALL')}
-                    className={`px-1.5 py-0.5 rounded ${chartTimeframe === 'ALL' ? 'bg-surface text-primaryText font-medium' : 'text-secondaryText hover:text-primaryText'}`}
+                    onClick={() => { setSelectedDateRange(null); setSelectedDateFilter(null); setChartTimeframe('ALL'); }}
+                    className={`px-1.5 py-0.5 rounded ${chartTimeframe === 'ALL' && !selectedDateRange && !selectedDateFilter ? 'bg-surface text-primaryText font-medium' : 'text-secondaryText hover:text-primaryText'}`}
                   >
                     All
                   </button>
@@ -1571,7 +1600,7 @@
                 </div>
 
                 <div className="mt-4 pt-3 border-t border-borderMuted/40 flex justify-between items-center">
-                  <span className="text-[10px] text-secondaryText">Click any date to load stream</span>
+                  <span className="text-[10px] text-secondaryText">Click any date to filter stream</span>
                   <button 
                     onClick={() => setShowCalendarModal(false)}
                     className="bg-appBg border border-borderMuted text-secondaryText hover:text-primaryText px-3 py-1 rounded text-xs"
