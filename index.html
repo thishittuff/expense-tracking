@@ -140,6 +140,7 @@
 
       const [transactions, setTransactions] = useState([]);
       const [liveNotification, setLiveNotification] = useState(null);
+      const [realtimeStatus, setRealtimeStatus] = useState('CONNECTING');
       const [filter, setFilter] = useState('ALL');
       const [selectedDateFilter, setSelectedDateFilter] = useState(null);
       const [selectedDateRange, setSelectedDateRange] = useState(null);
@@ -513,45 +514,145 @@
       useEffect(() => {
         if (!activeUser) return;
 
-        const matchesUser = (payload) => {
-          if (!payload) return false;
-          const newUid = payload.new?.user_id;
-          const oldUid = payload.old?.user_id;
-          if (newUid !== undefined && newUid !== null) return String(newUid) === String(activeUser.user_id);
-          if (oldUid !== undefined && oldUid !== null) return String(oldUid) === String(activeUser.user_id);
-          return true;
+        let isMounted = true;
+        const channelName = `realtime_user_${activeUser.user_id}`;
+        const userId = String(activeUser.user_id);
+
+        const belongsToUser = (payload) => {
+          const newUid = payload?.new?.user_id;
+          const oldUid = payload?.old?.user_id;
+          return String(newUid ?? oldUid ?? '') === userId;
+        };
+
+        const upsertTransactionFromPayload = (payload, type) => {
+          if (!belongsToUser(payload)) return;
+
+          const row = payload.eventType === 'DELETE' ? payload.old : payload.new;
+          if (!row?.id) {
+            fetchData();
+            return;
+          }
+
+          setTransactions(prev => {
+            if (payload.eventType === 'DELETE') {
+              return prev.filter(item => !(item.id === row.id && item.type === type));
+            }
+
+            const nextRow = { ...row, type };
+            const existingIndex = prev.findIndex(
+              item => item.id === nextRow.id && item.type === type
+            );
+
+            if (existingIndex === -1) {
+              return [nextRow, ...prev].sort(
+                (a, b) => new Date(b.created_at) - new Date(a.created_at)
+              );
+            }
+
+            const next = [...prev];
+            next[existingIndex] = nextRow;
+            return next.sort(
+              (a, b) => new Date(b.created_at) - new Date(a.created_at)
+            );
+          });
+
+          if (payload.eventType === 'INSERT') {
+            if (navigator.vibrate) navigator.vibrate([80, 40]);
+            const label = type === 'EXPENSE' ? 'Expense' : 'Deposit';
+            setLiveNotification(`+ ₹${row.amount} (${row.note || label})`);
+            window.clearTimeout(window.__journalLiveNotificationTimer);
+            window.__journalLiveNotificationTimer = window.setTimeout(
+              () => setLiveNotification(null),
+              4000
+            );
+          }
+        };
+
+        const handleCategoryRealtime = (payload) => {
+          if (!belongsToUser(payload)) return;
+
+          if (payload.eventType === 'INSERT' && payload.new?.name) {
+            setCategories(prev =>
+              prev.includes(payload.new.name) ? prev : [...prev, payload.new.name]
+            );
+          } else if (payload.eventType === 'DELETE' && payload.old?.name) {
+            setCategories(prev => prev.filter(name => name !== payload.old.name));
+          } else if (payload.eventType === 'UPDATE') {
+            fetchCategories();
+          }
         };
 
         const channel = supabase
-          .channel(`realtime_user_${activeUser.user_id}`)
-          .on('postgres_changes', { event: '*', schema: 'public', table: 'expenses' }, (payload) => {
-            if (matchesUser(payload)) {
-              if (payload.eventType === 'INSERT' && payload.new) {
-                if (navigator.vibrate) navigator.vibrate([80, 40]);
-                setLiveNotification(`+ ₹${payload.new.amount} (${payload.new.note || 'Expense'})`);
-                setTimeout(() => setLiveNotification(null), 4000);
-              }
-              fetchData();
-            }
-          })
-          .on('postgres_changes', { event: '*', schema: 'public', table: 'deposits' }, (payload) => {
-            if (matchesUser(payload)) {
-              if (payload.eventType === 'INSERT' && payload.new) {
-                if (navigator.vibrate) navigator.vibrate([80, 40]);
-                setLiveNotification(`+ ₹${payload.new.amount} (${payload.new.note || 'Deposit'})`);
-                setTimeout(() => setLiveNotification(null), 4000);
-              }
-              fetchData();
-            }
-          })
-          .on('postgres_changes', { event: '*', schema: 'public', table: 'categories' }, (payload) => {
-            if (matchesUser(payload)) {
-              fetchCategories();
-            }
-          })
-          .subscribe();
+          .channel(channelName)
+          .on(
+            'postgres_changes',
+            {
+              event: '*',
+              schema: 'public',
+              table: 'expenses',
+              filter: `user_id=eq.${activeUser.user_id}`
+            },
+            payload => upsertTransactionFromPayload(payload, 'EXPENSE')
+          )
+          .on(
+            'postgres_changes',
+            {
+              event: '*',
+              schema: 'public',
+              table: 'deposits',
+              filter: `user_id=eq.${activeUser.user_id}`
+            },
+            payload => upsertTransactionFromPayload(payload, 'DEPOSIT')
+          )
+          .on(
+            'postgres_changes',
+            {
+              event: '*',
+              schema: 'public',
+              table: 'categories',
+              filter: `user_id=eq.${activeUser.user_id}`
+            },
+            handleCategoryRealtime
+          )
+          .subscribe(status => {
+            if (!isMounted) return;
 
-        return () => { supabase.removeChannel(channel); };
+            if (status === 'SUBSCRIBED') {
+              setRealtimeStatus('CONNECTED');
+              console.info('[Financial Journal] Supabase Realtime: SUBSCRIBED');
+            } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+              setRealtimeStatus('DEGRADED');
+              console.error(
+                `[Financial Journal] Supabase Realtime status: ${status}. ` +
+                'Check Realtime publication and RLS policies in Supabase.'
+              );
+              setLiveNotification('⚠ Live Sync unavailable');
+              window.clearTimeout(window.__journalLiveNotificationTimer);
+              window.__journalLiveNotificationTimer = window.setTimeout(
+                () => setLiveNotification(null),
+                5000
+              );
+              fetchData();
+            } else if (status === 'CLOSED') {
+              setRealtimeStatus('DISCONNECTED');
+              console.warn('[Financial Journal] Supabase Realtime channel closed.');
+            }
+          });
+
+        // Fallback refresh keeps the dashboard synchronized even when Supabase
+        // Realtime is disabled for a table or temporarily loses its WebSocket.
+        // It is a safety net; normal updates arrive instantly through Realtime.
+        const fallbackPoll = window.setInterval(() => {
+          if (isMounted) fetchData();
+        }, 5000);
+
+        return () => {
+          isMounted = false;
+          window.clearInterval(fallbackPoll);
+          window.clearTimeout(window.__journalLiveNotificationTimer);
+          supabase.removeChannel(channel);
+          setRealtimeStatus('DISCONNECTED');
+        };
       }, [activeUser]);
 
       /* Doughnut / Pie Chart rendering logic */
@@ -1025,7 +1126,7 @@
             <div className="flex items-center justify-between mb-4 pb-3 border-b border-borderMuted/40">
               <div className="flex items-center gap-2">
                 <span className="w-2 h-2 rounded-full bg-sage animate-pulse"></span>
-                <span className="text-[11px] font-semibold text-secondaryText tracking-wide uppercase">Live Sync</span>
+                <span className="text-[11px] font-semibold text-secondaryText tracking-wide uppercase">{realtimeStatus === 'CONNECTED' ? 'Live Sync' : realtimeStatus === 'DEGRADED' ? 'Live Sync • Fallback' : 'Syncing…'}</span>
               </div>
               
               <div className="flex items-center gap-2">
