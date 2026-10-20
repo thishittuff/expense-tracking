@@ -158,6 +158,22 @@
       const [showTrendFilterModal, setShowTrendFilterModal] = useState(false);
 
       const [excludedPieCategories, setExcludedPieCategories] = useState([]);
+
+      // Top-5 bar chart state (exclusions are remembered per user, like the line chart)
+      const [excludedBarCategories, setExcludedBarCategories] = useState([]);
+      const [showBarFilterModal, setShowBarFilterModal] = useState(false);
+      const [barTimeframe, setBarTimeframe] = useState('MONTH');
+      const [barEmpty, setBarEmpty] = useState(false);
+      const [barDateRange, setBarDateRange] = useState(null);   // custom range for the bar chart
+      const [barStream, setBarStream] = useState(null);         // journal stream loaded from a bar click
+
+      // Date range picker (shared by the pie and bar charts)
+      const [rangeModal, setRangeModal] = useState(null);       // 'PIE' | 'BAR' | null
+      const [rangeFrom, setRangeFrom] = useState('');
+      const [rangeTo, setRangeTo] = useState('');
+      const [rangeError, setRangeError] = useState('');
+      const barChartRef = useRef(null);
+      const barChartInstance = useRef(null);
       const [otherCategoriesList, setOtherCategoriesList] = useState([]);
 
       const [showCalendarModal, setShowCalendarModal] = useState(false);
@@ -225,6 +241,17 @@
             setExcludedTrendCategories([]);
           }
 
+          const savedBarExclusions = localStorage.getItem(`journal_excluded_bar_cats_${activeUser.user_id}`);
+          if (savedBarExclusions) {
+            try {
+              setExcludedBarCategories(JSON.parse(savedBarExclusions));
+            } catch (e) {
+              setExcludedBarCategories([]);
+            }
+          } else {
+            setExcludedBarCategories([]);
+          }
+
           fetchCategories();
           fetchData();
         }
@@ -232,7 +259,7 @@
 
       useEffect(() => {
         setVisibleTxCount(INITIAL_VISIBLE_COUNT);
-      }, [filter, selectedDateFilter, selectedDateRange, selectedCategoryFilter]);
+      }, [filter, selectedDateFilter, selectedDateRange, selectedCategoryFilter, barStream]);
 
       const fetchCategories = async () => {
         if (!activeUser) return;
@@ -259,6 +286,84 @@
           const next = typeof valOrFn === 'function' ? valOrFn(prev) : valOrFn;
           if (activeUser) {
             localStorage.setItem(`journal_excluded_trend_cats_${activeUser.user_id}`, JSON.stringify(next));
+          }
+          return next;
+        });
+      };
+
+      const toInputDate = (d) => {
+        const dt = new Date(d);
+        return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+      };
+
+      const parseInputDate = (str, endOfDay) => {
+        const [y, m, d] = str.split('-').map(Number);
+        return endOfDay ? new Date(y, m - 1, d, 23, 59, 59, 999) : new Date(y, m - 1, d, 0, 0, 0, 0);
+      };
+
+      const formatRangeLabel = (start, end) => {
+        const thisYear = new Date().getFullYear();
+        const fmt = (d) => d.toLocaleDateString('en-IN', {
+          day: 'numeric',
+          month: 'short',
+          ...(d.getFullYear() !== thisYear ? { year: 'numeric' } : {})
+        });
+        return toInputDate(start) === toInputDate(end) ? fmt(start) : `${fmt(start)} – ${fmt(end)}`;
+      };
+
+      const openRangeModal = (target) => {
+        const current = target === 'PIE' ? selectedDateRange : barDateRange;
+        const today = new Date();
+        const monthAgo = new Date();
+        monthAgo.setDate(monthAgo.getDate() - 30);
+        setRangeFrom(toInputDate(current ? current.start : monthAgo));
+        setRangeTo(toInputDate(current ? current.end : today));
+        setRangeError('');
+        setRangeModal(target);
+      };
+
+      const applyPreset = (days) => {
+        const today = new Date();
+        const from = new Date();
+        from.setDate(from.getDate() - (days - 1));
+        setRangeFrom(toInputDate(from));
+        setRangeTo(toInputDate(today));
+        setRangeError('');
+      };
+
+      const applyRange = () => {
+        if (!rangeFrom || !rangeTo) { setRangeError('Pick both dates.'); return; }
+        const start = parseInputDate(rangeFrom, false);
+        const end = parseInputDate(rangeTo, true);
+        if (start > end) { setRangeError('"From" must be on or before "To".'); return; }
+
+        const range = { start: start.toISOString(), end: end.toISOString(), label: formatRangeLabel(start, end) };
+        if (rangeModal === 'PIE') {
+          setSelectedDateFilter(null);
+          setSelectedDateRange(range);
+          setBarStream(null);
+        } else {
+          setBarDateRange(range);
+        }
+        setRangeModal(null);
+      };
+
+      const getBarPeriod = () => {
+        const now = new Date();
+        const endOfToday = new Date(now);
+        endOfToday.setHours(23, 59, 59, 999);
+        if (barDateRange) {
+          return { start: new Date(barDateRange.start), end: new Date(barDateRange.end), label: barDateRange.label };
+        }
+        if (barTimeframe === 'WEEK') return { start: getStartOfWeek(now), end: endOfToday, label: 'This Week' };
+        return { start: getStartOfMonth(now), end: endOfToday, label: 'This Month' };
+      };
+
+      const updateExcludedBarCategories = (valOrFn) => {
+        setExcludedBarCategories(prev => {
+          const next = typeof valOrFn === 'function' ? valOrFn(prev) : valOrFn;
+          if (activeUser) {
+            localStorage.setItem(`journal_excluded_bar_cats_${activeUser.user_id}`, JSON.stringify(next));
           }
           return next;
         });
@@ -414,7 +519,12 @@
         const deposits = (depRes.data || []).map(item => ({ ...item, type: 'DEPOSIT' }));
 
         const combined = [...expenses, ...deposits].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-        setTransactions(combined);
+        // Only update state if the data actually changed. Returning `prev` keeps the
+        // same array reference, so React skips re-rendering and the charts are NOT
+        // destroyed/recreated (which was resetting hover tooltips every poll).
+        setTransactions(prev =>
+          JSON.stringify(prev) === JSON.stringify(combined) ? prev : combined
+        );
       };
 
       const calculateMetrics = () => {
@@ -507,6 +617,7 @@
       };
 
       const loadJournalForDate = (dateStr) => {
+        setBarStream(null);
         setSelectedDateRange(null);
         setSelectedDateFilter(dateStr);
       };
@@ -644,7 +755,7 @@
         // It is a safety net; normal updates arrive instantly through Realtime.
         const fallbackPoll = window.setInterval(() => {
           if (isMounted) fetchData();
-        }, 5000);
+        }, 15000);
 
         return () => {
           isMounted = false;
@@ -708,7 +819,9 @@
           }
         });
 
-        setOtherCategoriesList(oCats);
+        setOtherCategoriesList(prev =>
+          prev.length === oCats.length && prev.every((c, i) => c === oCats[i]) ? prev : oCats
+        );
 
         if (otherTotal > 0) {
           finalCategoryTotals["Other (<2%)"] = otherTotal;
@@ -745,6 +858,7 @@
                 const index = activeElements[0].index;
                 const clickedCat = labels[index];
                 if (clickedCat && clickedCat !== 'No Data') {
+                  setBarStream(null);
                   setSelectedCategoryFilter(clickedCat);
                 }
               }
@@ -941,6 +1055,138 @@
         });
       }, [transactions, activeUser, excludedTrendCategories, trendMode]);
 
+      /* Top 5 Spending Categories bar chart (+ "Others"); excluding one pulls the next up */
+      useEffect(() => {
+        if (!barChartRef.current || !activeUser) return;
+
+        const period = getBarPeriod();
+
+        const totals = {};
+        transactions.forEach(t => {
+          if (t.type !== 'EXPENSE') return;
+          const tDate = new Date(t.created_at);
+          if (tDate < period.start || tDate > period.end) return;
+
+          const cat = t.category || 'General';
+          if (excludedBarCategories.includes(cat)) return;
+          totals[cat] = (totals[cat] || 0) + (Number(t.amount) || 0);
+        });
+
+        const ranked = Object.entries(totals).sort((a, b) => b[1] - a[1]);
+        const top = ranked.slice(0, 5);
+        const rest = ranked.slice(5);
+        const othersTotal = rest.reduce((sum, [, amt]) => sum + amt, 0);
+        const othersCats = rest.map(([name]) => name);
+        const othersNames = rest.map(([name, amt]) => `${name} (₹${amt.toLocaleString('en-IN')})`);
+        const grandTotal = ranked.reduce((sum, [, amt]) => sum + amt, 0);
+
+        const labels = top.map(([name]) => name);
+        const data = top.map(([, amt]) => amt);
+        const colors = top.map(([name]) => getCategoryColor(name));
+        if (othersTotal > 0) {
+          labels.push('Others');
+          data.push(othersTotal);
+          colors.push('#4B5563');
+        }
+
+        setBarEmpty(labels.length === 0);
+
+        if (barChartInstance.current) barChartInstance.current.destroy();
+
+        const valueLabelPlugin = {
+          id: 'barValueLabels',
+          afterDatasetsDraw(chart) {
+            const { ctx } = chart;
+            const meta = chart.getDatasetMeta(0);
+            ctx.save();
+            ctx.fillStyle = '#E2E8F0';
+            ctx.font = '500 10px sans-serif';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+            meta.data.forEach((bar, i) => {
+              ctx.fillText(formatCompactAmount(data[i]), bar.x + 6, bar.y);
+            });
+            ctx.restore();
+          }
+        };
+
+        const ctx = barChartRef.current.getContext('2d');
+        barChartInstance.current = new Chart(ctx, {
+          type: 'bar',
+          data: {
+            labels,
+            datasets: [{
+              data,
+              backgroundColor: colors,
+              borderRadius: 4,
+              barThickness: 18
+            }]
+          },
+          plugins: [valueLabelPlugin],
+          options: {
+            indexAxis: 'y',
+            responsive: true,
+            maintainAspectRatio: false,
+            layout: { padding: { right: 44 } },
+            onHover: (event, chartElement) => {
+              if (event.native) {
+                const el = chartElement[0];
+                event.native.target.style.cursor = el ? 'pointer' : 'default';
+              }
+            },
+            onClick: (evt, activeElements) => {
+              if (!activeElements || activeElements.length === 0) return;
+              const clicked = labels[activeElements[0].index];
+              if (!clicked) return;
+              // Load the Journal stream for this bar (Others = every category inside it)
+              setBarStream({
+                categories: clicked === 'Others' ? othersCats : [clicked],
+                label: clicked,
+                period: period.label,
+                start: period.start.toISOString(),
+                end: period.end.toISOString()
+              });
+              setTimeout(() => {
+                const el = document.getElementById('journal-stream');
+                if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+              }, 60);
+            },
+            plugins: {
+              legend: { display: false },
+              tooltip: {
+                backgroundColor: '#101214',
+                borderColor: '#2A2F36',
+                borderWidth: 1,
+                titleColor: '#9CA3AF',
+                bodyColor: '#F5F5F4',
+                callbacks: {
+                  label: (c) => {
+                    const pct = grandTotal > 0 ? Math.round((c.parsed.x / grandTotal) * 100) : 0;
+                    return ` ₹${c.parsed.x.toLocaleString('en-IN')} (${pct}%)`;
+                  },
+                  afterLabel: (c) => c.label === 'Others' ? othersNames : ''
+                }
+              }
+            },
+            scales: {
+              x: {
+                beginAtZero: true,
+                grid: { color: '#2A2F36', drawBorder: false },
+                ticks: {
+                  color: '#6B7280',
+                  font: { size: 8 },
+                  callback: (val) => val >= 1000 ? `₹${(val / 1000).toFixed(1)}k` : `₹${val}`
+                }
+              },
+              y: {
+                grid: { display: false },
+                ticks: { color: '#E2E8F0', font: { size: 10, weight: '500' } }
+              }
+            }
+          }
+        });
+      }, [transactions, activeUser, barTimeframe, barDateRange, excludedBarCategories]);
+
       const groupTransactionsByDate = (txs) => {
         const groups = {};
         const todayStr = new Date().toDateString();
@@ -999,6 +1245,7 @@
       };
 
       const handleTrendCubeClick = (d) => {
+        setBarStream(null);
         if (d.dateStr) {
           setSelectedDateRange(null);
           setSelectedDateFilter(d.dateStr);
@@ -1082,6 +1329,13 @@
         if (filter === 'EXPENSES' && t.type !== 'EXPENSE') return false;
         if (filter === 'DEPOSITS' && t.type !== 'DEPOSIT') return false;
         
+        if (barStream) {
+          if (t.type !== 'EXPENSE') return false;
+          const d = new Date(t.created_at);
+          if (d < new Date(barStream.start) || d > new Date(barStream.end)) return false;
+          return barStream.categories.includes(t.category || 'General');
+        }
+
         if (selectedDateFilter) {
           const tDateStr = new Date(t.created_at).toDateString();
           if (tDateStr !== selectedDateFilter) return false;
@@ -1361,10 +1615,11 @@
                     Month
                   </button>
                   <button
-                    onClick={() => { setSelectedDateRange(null); setSelectedDateFilter(null); setChartTimeframe('ALL'); }}
-                    className={`px-1.5 py-0.5 rounded ${chartTimeframe === 'ALL' && !selectedDateRange && !selectedDateFilter ? 'bg-surface text-primaryText font-medium' : 'text-secondaryText hover:text-primaryText'}`}
+                    onClick={() => openRangeModal('PIE')}
+                    className={`px-1.5 py-0.5 rounded ${selectedDateRange ? 'bg-surface text-primaryText font-medium' : 'text-secondaryText hover:text-primaryText'}`}
+                    title="Pick a date range"
                   >
-                    All
+                    📅 Range
                   </button>
                 </div>
               </div>
@@ -1378,6 +1633,74 @@
               </div>
             </div>
 
+            {/* Top 5 Spending Categories Bar Chart */}
+            <div className="order-3 sm:col-span-2 bg-surface border border-borderMuted/60 p-4 rounded-lg flex flex-col">
+              <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+                <div className="flex items-center gap-1.5">
+                  <div className="text-xs font-medium text-secondaryText">Top Spending{barDateRange ? ` (${barDateRange.label})` : ''}</div>
+                  <div className="flex gap-1 bg-appBg/60 p-0.5 rounded border border-borderMuted/80 text-[10px]">
+                    {[['WEEK', 'Week'], ['MONTH', 'Month']].map(([key, label]) => (
+                      <button
+                        key={key}
+                        onClick={() => { setBarDateRange(null); setBarTimeframe(key); }}
+                        className={`px-1.5 py-0.5 rounded ${!barDateRange && barTimeframe === key ? 'bg-surface text-primaryText font-medium' : 'text-secondaryText hover:text-primaryText'}`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                    <button
+                      onClick={() => openRangeModal('BAR')}
+                      className={`px-1.5 py-0.5 rounded ${barDateRange ? 'bg-surface text-primaryText font-medium' : 'text-secondaryText hover:text-primaryText'}`}
+                      title="Pick a date range"
+                    >
+                      📅 Range
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-1.5">
+                  {excludedBarCategories.length > 0 && (
+                    <button
+                      onClick={() => updateExcludedBarCategories([])}
+                      className="text-[9px] bg-expenseColor/20 text-expenseColor border border-expenseColor/40 px-1.5 py-0.5 rounded font-medium hover:bg-expenseColor/30"
+                      title="Reset bar chart filters"
+                    >
+                      Reset ({excludedBarCategories.length})
+                    </button>
+                  )}
+                  <button
+                    onClick={() => setShowBarFilterModal(true)}
+                    className={`text-[10px] border px-2 py-0.5 rounded transition-colors flex items-center gap-1 ${
+                      excludedBarCategories.length > 0
+                        ? 'bg-expenseColor/20 text-expenseColor border-expenseColor/40 font-medium'
+                        : 'bg-appBg border-borderMuted text-secondaryText hover:text-primaryText'
+                    }`}
+                    title="Filter categories from bar chart"
+                  >
+                    <span>🏷️ Filter</span>
+                    {excludedBarCategories.length > 0 && (
+                      <span className="bg-expenseColor text-appBg font-bold text-[9px] px-1 rounded-full">
+                        {excludedBarCategories.length}
+                      </span>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              <div className="relative w-full h-[230px]">
+                <canvas ref={barChartRef}></canvas>
+                {barEmpty && (
+                  <div className="absolute inset-0 flex items-center justify-center text-[11px] text-secondaryText/70 pointer-events-none">
+                    No expenses in this period
+                  </div>
+                )}
+              </div>
+
+              <div className="mt-2 text-center">
+                <span className="text-[9px] text-secondaryText/70">Click a bar to load its Journal stream • Use Filter to hide categories (next one moves up from Others)</span>
+              </div>
+            </div>
+
           </section>
 
           {/* Timeline Feed */}
@@ -1386,7 +1709,20 @@
               <div className="flex items-center gap-2 flex-wrap">
                 <h2 className="text-xs font-medium text-secondaryText uppercase tracking-wider">Journal Stream</h2>
                 
-                {selectedDateFilter && (
+                {barStream && (
+                  <div className="flex items-center gap-1.5 bg-sage/10 border border-sage/30 text-sage text-[10px] px-2 py-0.5 rounded-full font-medium">
+                    <span>📊 {barStream.label} · {barStream.period}</span>
+                    <button
+                      onClick={() => setBarStream(null)}
+                      className="hover:text-primaryText font-bold ml-1"
+                      title="Clear bar chart filter"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                )}
+
+                {!barStream && selectedDateFilter && (
                   <div className="flex items-center gap-1.5 bg-sage/10 border border-sage/30 text-sage text-[10px] px-2 py-0.5 rounded-full font-medium">
                     <span>📅 {new Date(selectedDateFilter).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}</span>
                     <button 
@@ -1399,7 +1735,7 @@
                   </div>
                 )}
 
-                {selectedDateRange && (
+                {!barStream && selectedDateRange && (
                   <div className="flex items-center gap-1.5 bg-sage/10 border border-sage/30 text-sage text-[10px] px-2 py-0.5 rounded-full font-medium">
                     <span>📅 {selectedDateRange.label}</span>
                     <button 
@@ -1412,7 +1748,7 @@
                   </div>
                 )}
 
-                {selectedCategoryFilter && (
+                {!barStream && selectedCategoryFilter && (
                   <div className="flex items-center gap-1.5 bg-sage/10 border border-sage/30 text-sage text-[10px] px-2 py-0.5 rounded-full font-medium">
                     <span>🏷️ {selectedCategoryFilter}</span>
                     <button 
@@ -1444,10 +1780,10 @@
             {Object.keys(groupedTransactions).length === 0 ? (
               <div className="text-center py-12 text-secondaryText text-xs bg-surface/20 rounded-lg border border-borderMuted/40">
                 No entries recorded matching the current filters.
-                {(selectedDateFilter || selectedDateRange || selectedCategoryFilter) && (
+                {(selectedDateFilter || selectedDateRange || selectedCategoryFilter || barStream) && (
                   <div className="mt-2">
                     <button 
-                      onClick={() => { setSelectedDateFilter(null); setSelectedDateRange(null); setSelectedCategoryFilter(null); }} 
+                      onClick={() => { setSelectedDateFilter(null); setSelectedDateRange(null); setSelectedCategoryFilter(null); setBarStream(null); }} 
                       className="text-sage hover:underline text-xs font-medium"
                     >
                       Clear all filters
@@ -1635,6 +1971,128 @@
 
                 <button 
                   onClick={() => setShowTrendFilterModal(false)} 
+                  className="w-full bg-sage text-appBg py-2 rounded-md text-xs font-medium hover:opacity-90"
+                >
+                  Done
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Date Range Modal (pie + bar) */}
+          {rangeModal && (
+            <div className="fixed inset-0 bg-appBg/80 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+              <div className="bg-surface border border-borderMuted p-6 rounded-lg w-full max-w-sm shadow-2xl">
+                <div className="flex justify-between items-center mb-2">
+                  <h3 className="text-sm font-medium text-primaryText">
+                    Select Date Range · {rangeModal === 'PIE' ? 'Expense Breakdown' : 'Top Spending'}
+                  </h3>
+                  <button onClick={() => setRangeModal(null)} className="text-secondaryText hover:text-primaryText text-xs">✕</button>
+                </div>
+
+                <div className="flex gap-2 mb-4 mt-3 text-[10px]">
+                  {[7, 30, 90].map(d => (
+                    <button
+                      key={d}
+                      onClick={() => applyPreset(d)}
+                      className="px-2 py-1 rounded border border-borderMuted bg-appBg text-secondaryText hover:text-primaryText"
+                    >
+                      Last {d} days
+                    </button>
+                  ))}
+                </div>
+
+                <div className="grid grid-cols-2 gap-3 mb-2">
+                  <label className="text-[11px] text-secondaryText flex flex-col gap-1">
+                    From
+                    <input
+                      type="date"
+                      value={rangeFrom}
+                      onChange={(e) => { setRangeFrom(e.target.value); setRangeError(''); }}
+                      style={{ colorScheme: 'dark' }}
+                      className="bg-appBg border border-borderMuted rounded px-2 py-1.5 text-xs text-primaryText"
+                    />
+                  </label>
+                  <label className="text-[11px] text-secondaryText flex flex-col gap-1">
+                    To
+                    <input
+                      type="date"
+                      value={rangeTo}
+                      onChange={(e) => { setRangeTo(e.target.value); setRangeError(''); }}
+                      style={{ colorScheme: 'dark' }}
+                      className="bg-appBg border border-borderMuted rounded px-2 py-1.5 text-xs text-primaryText"
+                    />
+                  </label>
+                </div>
+
+                {rangeError && <p className="text-[11px] text-expenseColor mb-2">{rangeError}</p>}
+
+                <div className="flex gap-2 mt-4">
+                  <button
+                    onClick={() => setRangeModal(null)}
+                    className="flex-1 border border-borderMuted text-secondaryText py-2 rounded-md text-xs hover:text-primaryText"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={applyRange}
+                    className="flex-1 bg-sage text-appBg py-2 rounded-md text-xs font-medium hover:opacity-90"
+                  >
+                    Apply
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Bar Chart Filter Modal */}
+          {showBarFilterModal && (
+            <div className="fixed inset-0 bg-appBg/80 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+              <div className="bg-surface border border-borderMuted p-6 rounded-lg w-full max-w-sm shadow-2xl flex flex-col max-h-[85vh]">
+                <div className="flex justify-between items-center mb-2">
+                  <h3 className="text-sm font-medium text-primaryText">Filter Top Spending</h3>
+                  <button onClick={() => setShowBarFilterModal(false)} className="text-secondaryText hover:text-primaryText text-xs">✕</button>
+                </div>
+                <p className="text-[11px] text-secondaryText mb-4">Uncheck categories to hide them. The next biggest category takes their place.</p>
+
+                <div className="flex justify-between items-center text-xs text-sage mb-3">
+                  <button onClick={() => updateExcludedBarCategories([])} className="hover:underline">Select All</button>
+                </div>
+
+                <div className="overflow-y-auto space-y-2 pr-1 flex-1 no-scrollbar mb-4">
+                  {Array.from(new Set([
+                    ...categories,
+                    ...transactions.filter(t => t.type === 'EXPENSE').map(t => t.category || 'General')
+                  ])).map((cat) => {
+                    const isExcluded = excludedBarCategories.includes(cat);
+                    return (
+                      <label
+                        key={cat}
+                        className={`flex items-center justify-between p-2 rounded border cursor-pointer text-xs transition-colors ${
+                          !isExcluded ? 'bg-appBg/80 border-borderMuted text-primaryText' : 'bg-appBg/20 border-borderMuted/30 text-secondaryText/50 line-through'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={!isExcluded}
+                            onChange={() => {
+                              updateExcludedBarCategories(prev =>
+                                isExcluded ? prev.filter(c => c !== cat) : [...prev, cat]
+                              );
+                            }}
+                            className="rounded border-borderMuted text-sage focus:ring-0"
+                          />
+                          <span>{cat}</span>
+                        </div>
+                        <span className="w-2 h-2 rounded-full" style={{ backgroundColor: getCategoryColor(cat) }}></span>
+                      </label>
+                    );
+                  })}
+                </div>
+
+                <button
+                  onClick={() => setShowBarFilterModal(false)}
                   className="w-full bg-sage text-appBg py-2 rounded-md text-xs font-medium hover:opacity-90"
                 >
                   Done
